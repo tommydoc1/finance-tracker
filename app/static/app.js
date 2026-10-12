@@ -302,9 +302,19 @@ function openingForm(holdings) {
       { name: 'holding_id', label: 'Fund', type: 'select', options: holdings.map(h => [h.id, h.ticker + (h.name ? ' – ' + h.name : '')]), full: true },
       { name: 'date', label: 'As of', type: 'date', required: true },
       { name: 'units', label: 'Units held', type: 'number', step: 'any', required: true },
-      { name: 'paid_in', label: 'Total paid in so far (£)', type: 'number', step: '0.01', required: true, full: true },
+      { name: 'paid_in', label: 'Total paid in so far (£) – the total amount, not the price per unit', type: 'number', step: '0.01', required: true, full: true },
     ],
-    onSubmit: async v => { await api(`holdings/${v.holding_id}/opening`, { method: 'POST', body: v }); toast('Position added'); route(); },
+    onSubmit: async v => {
+      const h = holdings.find(x => String(x.id) === String(v.holding_id));
+      const price = h && h.price, perUnit = v.paid_in / v.units;
+      if (price && perUnit < price * 0.25) {
+        const ok = confirm(`£${(+v.paid_in).toLocaleString('en-GB')} paid in for ${(+v.units).toLocaleString('en-GB')} units is only £${perUnit.toFixed(4)} per unit, `
+          + `but the current price is £${(+price).toFixed(2)} – your holding would be worth ${fmt(v.units * price)}.\n\n`
+          + `"Total paid in" should be the total amount contributed (e.g. ${fmt(v.units * price * 0.8)}), not the unit price.\n\nSave anyway?`);
+        if (!ok) throw new Error('Not saved – check the total paid in');
+      }
+      await api(`holdings/${v.holding_id}/opening`, { method: 'POST', body: v }); toast('Position added'); route();
+    },
   });
 }
 
