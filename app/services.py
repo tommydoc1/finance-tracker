@@ -282,6 +282,38 @@ def _fx_to_gbp(client, currency):
     return float(r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"])
 
 
+class FxSeries:
+    """Daily <currency> -> GBP rates, so each day's price/dividend is converted at that day's rate
+    (not today's). Pence lines are a fixed 1/100; GBP is 1."""
+
+    def __init__(self, client, currency, rng):
+        self.fixed = 0.01 if currency in ("GBp", "GBX") else (1.0 if currency == "GBP" else None)
+        self.days, self.rates = [], []
+        if self.fixed is not None:
+            return
+        r = client.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{currency.upper()}GBP=X",
+                       params={"range": rng, "interval": "1d"}, headers=UA)
+        r.raise_for_status()
+        res = r.json()["chart"]["result"][0]
+        pts = sorted((datetime.utcfromtimestamp(t).date().isoformat(), c)
+                     for t, c in zip(res.get("timestamp") or [], (res.get("indicators", {}).get("quote") or [{}])[0].get("close") or [])
+                     if c)
+        self.days, self.rates = [p[0] for p in pts], [p[1] for p in pts]
+        self.latest = float(res["meta"].get("regularMarketPrice") or (self.rates[-1] if self.rates else 0))
+        if not self.latest:
+            raise ValueError(f"no {currency}/GBP exchange rate available")
+
+    def on(self, day):
+        """Rate for `day`: that day's close, else the last earlier one, else the first available."""
+        if self.fixed is not None:
+            return self.fixed
+        import bisect
+        i = bisect.bisect_right(self.days, day) - 1
+        if i >= 0:
+            return self.rates[i]
+        return self.rates[0] if self.rates else self.latest
+
+
 def _set_price_info(con, holding_id, info):
     con.execute("UPDATE holdings SET price_info=? WHERE id=?", (info, holding_id))
 
@@ -388,7 +420,7 @@ def fetch_prices(con, holding, rng="5d"):
         currency = meta.get("currency", "GBP")
         _set_price_info(con, holding["id"], " · ".join(x for x in (meta.get("longName") or meta.get("shortName") or sym,
                                                                    meta.get("exchangeName"), currency) if x))
-        fx = _fx_to_gbp(client, currency)  # current FX applied to history: good enough for GBP-listed lines
+        fx = FxSeries(client, currency, rng)  # USD/EUR lines: each day converted at that day's exchange rate
         ts = res.get("timestamp") or []
         closes = (res.get("indicators", {}).get("quote") or [{}])[0].get("close") or []
         divs = (res.get("events") or {}).get("dividends") or {}
@@ -396,13 +428,13 @@ def fetch_prices(con, holding, rng="5d"):
         if dv.get("amount") and dv.get("date"):
             con.execute("INSERT INTO dividend_events(holding_id,ex_date,per_share) VALUES(?,?,?) "
                         "ON CONFLICT(holding_id,ex_date) DO UPDATE SET per_share=excluded.per_share",
-                        (holding["id"], datetime.utcfromtimestamp(dv["date"]).date().isoformat(), round(dv["amount"] * fx, 8)))
+                        (holding["id"], (ex := datetime.utcfromtimestamp(dv["date"]).date().isoformat()), round(dv["amount"] * fx.on(ex), 8)))
     n = 0
     for t, c in zip(ts, closes):
         if c is None:
             continue
         day = datetime.utcfromtimestamp(t).date().isoformat()
-        _store_price(con, holding["id"], day, c * fx)
+        _store_price(con, holding["id"], day, c * fx.on(day))
         n += 1
     return n
 
