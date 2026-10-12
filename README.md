@@ -5,6 +5,8 @@ A self-hosted personal finance tracker for UK ISAs, cash savings and pensions. O
 **Tracks**
 - Accounts: Stocks & Shares ISA, Cash ISA, LISA, cash/savings, workplace pension, SIPP, GIA
 - Holdings (ETFs/funds/shares) with units, cost, value, gain, and **automatic daily prices** from Yahoo Finance (e.g. `VUAG.L` – pence converted to £)
+- **Pension & unit-trust funds without a ticker**: use the fund's ISIN as the price symbol (e.g. `GB00B0ZDNB53`) and prices come daily from FT.com
+- **Auto-invest**: recurring contributions can buy units of a fund at that day's price; **Set units** reconciles with the count your provider shows
 - **Interest rate history** per account – every change is kept, and interest is estimated daily from your actual balance × the rate in force that day
 - **Charges**: platform % fee, flat monthly fees, and each fund's OCF/TER → estimated £/year, plus actual fees you record
 - **Dividend & interest income** by month, tax year and holding

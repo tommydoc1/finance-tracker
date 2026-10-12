@@ -213,6 +213,8 @@ class AccountState:
                 if t["type"] == "buy":
                     units[hid] += t["units"]; cost[hid] += t["amount"]
                     self.last_trade_price[hid] = t["amount"] / t["units"]
+                elif t["type"] == "unit_adjust":
+                    units[hid] += t["units"]
                 elif t["type"] == "sell":
                     if units[hid] > 1e-12:
                         cost[hid] -= cost[hid] * min(t["units"] / units[hid], 1)

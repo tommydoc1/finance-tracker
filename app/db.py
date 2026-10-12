@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     date TEXT NOT NULL,
     type TEXT NOT NULL,              -- deposit | withdrawal | contribution | tax_relief | transfer_in | transfer_out
-                                     -- buy | sell | dividend | interest | fee | bonus
+                                     -- buy | sell | dividend | interest | fee | bonus | opening_balance
+                                     -- unit_adjust (amount 0, units +/-: correct unit count to match provider)
     amount REAL NOT NULL,            -- always positive GBP; direction comes from type
     holding_id INTEGER REFERENCES holdings(id) ON DELETE SET NULL,
     units REAL,
@@ -86,6 +87,7 @@ CREATE TABLE IF NOT EXISTS recurring (
     start_date TEXT NOT NULL,
     end_date TEXT,
     tax_relief_pct REAL DEFAULT 0,   -- e.g. 25 for relief-at-source pensions: adds a tax_relief txn
+    invest_holding_id INTEGER REFERENCES holdings(id) ON DELETE SET NULL,  -- auto-buy this fund with each payment
     active INTEGER NOT NULL DEFAULT 1
 );
 
@@ -132,9 +134,19 @@ def db():
         con.close()
 
 
+MIGRATIONS = [
+    # (table, column, definition) – added to existing databases on startup
+    ("recurring", "invest_holding_id", "INTEGER REFERENCES holdings(id) ON DELETE SET NULL"),
+]
+
+
 def init():
     with db() as con:
         con.executescript(SCHEMA)
+        for table, col, ddl in MIGRATIONS:
+            cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
+            if col not in cols:
+                con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
 
 
 def rows(cur):

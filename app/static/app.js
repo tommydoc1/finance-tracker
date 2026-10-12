@@ -27,6 +27,7 @@ const TXN = {
   deposit: 'Deposit', withdrawal: 'Withdrawal', contribution: 'Pension contribution', tax_relief: 'Tax relief',
   opening_balance: 'Opening balance', transfer_in: 'Transfer in', transfer_out: 'Transfer out',
   buy: 'Buy', sell: 'Sell', dividend: 'Dividend', interest: 'Interest', fee: 'Fee / charge', bonus: 'Bonus (e.g. LISA)',
+  unit_adjust: 'Unit adjustment',
 };
 const RULES = {
   last_working_day: 'Last working day of month', first_working_day: 'First working day of month',
@@ -228,11 +229,11 @@ function holdingForm(h, accountId) {
   form({
     title: h ? 'Edit holding' : 'Add holding',
     initial: h || { account_id: accountId },
-    hint: 'Price symbol is the Yahoo Finance code used for automatic daily prices – LSE lines end in .L (e.g. VUAG.L, VWRP.L). Pence prices are converted to £ automatically. Leave blank to enter prices by hand.',
+    hint: 'Price symbol is used for automatic daily prices. ETFs and shares: the Yahoo Finance code – LSE lines end in .L (e.g. VUAG.L, VWRP.L). Pension and unit-trust funds with no ticker: the fund\'s ISIN (e.g. GB00B0ZDNB53), priced from FT.com. Pence are converted to £ automatically. Leave blank to enter prices by hand.',
     fields: [
       { name: 'account_id', label: 'Account', type: 'select', options: accountOptions(), full: true },
       { name: 'ticker', label: 'Ticker', required: true, placeholder: 'VUAG' },
-      { name: 'price_symbol', label: 'Price symbol (auto prices)', placeholder: 'VUAG.L' },
+      { name: 'price_symbol', label: 'Price symbol or ISIN', placeholder: 'VUAG.L or GB00B0ZDNB53' },
       { name: 'name', label: 'Name', full: true, placeholder: 'Vanguard S&P 500 UCITS ETF' },
       { name: 'isin', label: 'ISIN' },
       { name: 'ocf_pct', label: 'OCF / TER (% per year)', type: 'number', step: '0.001' },
@@ -255,6 +256,36 @@ function priceForm(h) {
     hint: 'Price per unit in pounds (not pence). A manual price overrides an automatic one for that day.',
     fields: [{ name: 'date', label: 'Date', type: 'date', required: true }, { name: 'price', label: 'Price (£)', type: 'number', step: 'any', required: true }],
     onSubmit: async v => { await api(`holdings/${h.id}/prices`, { method: 'POST', body: v }); toast('Price saved'); route(); },
+  });
+}
+
+function openingForm(holdings) {
+  form({
+    title: 'Add existing position', initial: { holding_id: holdings[0]?.id, date: today() },
+    hint: 'For a fund you already hold when you start tracking (e.g. your pension). Enter the units your provider shows today and the total paid in so far (yours + employer + tax relief). Growth is then value minus paid in. Contributions from this date on are added by your recurring payment.',
+    fields: [
+      { name: 'holding_id', label: 'Fund', type: 'select', options: holdings.map(h => [h.id, h.ticker + (h.name ? ' – ' + h.name : '')]), full: true },
+      { name: 'date', label: 'As of', type: 'date', required: true },
+      { name: 'units', label: 'Units held', type: 'number', step: 'any', required: true },
+      { name: 'paid_in', label: 'Total paid in so far (£)', type: 'number', step: '0.01', required: true, full: true },
+    ],
+    onSubmit: async v => { await api(`holdings/${v.holding_id}/opening`, { method: 'POST', body: v }); toast('Position added'); route(); },
+  });
+}
+
+function setUnitsForm(h) {
+  form({
+    title: `Set units – ${h.ticker}`, initial: { date: today(), units: h.units ? +(+h.units).toFixed(4) : '' },
+    hint: 'Enter the exact unit count shown by your provider. Auto-invested units are estimated from the daily price, and providers usually buy a few days after the payment date, so they drift slightly – this corrects the difference without changing what you paid in.',
+    fields: [
+      { name: 'date', label: 'As of', type: 'date', required: true },
+      { name: 'units', label: 'Units held', type: 'number', step: 'any', required: true },
+    ],
+    onSubmit: async v => {
+      const r = await api(`holdings/${h.id}/set-units`, { method: 'POST', body: v });
+      toast(Math.abs(r.adjusted_by) > 0 ? `Adjusted by ${r.adjusted_by > 0 ? '+' : ''}${num(r.adjusted_by)} units` : 'Already matches');
+      route();
+    },
   });
 }
 
@@ -295,10 +326,12 @@ function valuationForm(v0, accountId) {
   });
 }
 
-function recurringForm(r, accountId) {
+async function recurringForm(r, accountId) {
+  await loadHoldings();
+  const investOpts = v => [['', 'Keep as cash'], ...HOLDINGS.filter(h => String(h.account_id) === String(v.account_id)).map(h => [h.id, `Buy ${h.ticker}${h.name ? ' – ' + h.name : ''}`])];
   form({
     title: r ? 'Edit recurring payment' : 'Add recurring payment',
-    initial: r || { account_id: accountId, txn_type: 'contribution', rule: 'last_working_day', day: 28, start_date: today().slice(0, 8) + '01', tax_relief_pct: 0 },
+    initial: r ? { ...r, invest_holding_id: r.invest_holding_id ?? '' } : { account_id: accountId, txn_type: 'contribution', rule: 'last_working_day', day: 28, start_date: today().slice(0, 8) + '01', tax_relief_pct: 0, invest_holding_id: '' },
     hint: 'Transactions are created automatically on each pay date (weekends and England & Wales bank holidays handled). Change the amount with "New amount" so past months keep their old value.',
     fields: [
       { name: 'account_id', label: 'Account', type: 'select', options: accountOptions(), full: true },
@@ -309,6 +342,8 @@ function recurringForm(r, accountId) {
       { name: 'start_date', label: 'Start', type: 'date', required: true },
       { name: 'end_date', label: 'End (optional)', type: 'date' },
       { name: 'tax_relief_pct', label: 'Add tax relief %', type: 'number', step: 'any', help: '25 for relief-at-source pensions; 0 for net pay / salary sacrifice', show: v => v.txn_type === 'contribution' },
+      { name: 'invest_holding_id', label: 'Invest each payment', type: 'select', options: investOpts, dynamic: true, full: true,
+        help: 'Converts each payment into units of this fund at that day\'s price (add the fund under Holdings first)', show: v => ['contribution', 'deposit'].includes(v.txn_type) },
       ...(r ? [{ name: 'active', label: 'Status', type: 'select', options: [[1, 'Active'], [0, 'Paused']] }]
         : [{ name: 'amount', label: 'Amount (£)', type: 'number', step: '0.01', required: true }]),
     ],
@@ -512,7 +547,7 @@ async function viewAccount(id) {
     const held = Object.fromEntries(a.holdings.map(h => [h.id, h]));
     const all = a.all_holdings.map(h => ({ ...h, ...(held[h.id] || { units: 0, value: 0, cost: 0, gain: 0, ocf_annual: 0 }) }));
     T.innerHTML = `<div class="card">
-      <div class="card-head"><h2>Holdings</h2><div class="btns"><button class="sm" id="b-addh">Add holding</button></div></div>
+      <div class="card-head"><h2>Holdings</h2><div class="btns">${all.length ? '<button class="sm" id="b-open">Add existing position</button>' : ''}<button class="sm" id="b-addh">Add holding</button></div></div>
       <div class="table-wrap"><table>
       <thead><tr><th>Ticker</th><th class="n">Units</th><th class="n">Price</th><th class="n">Value</th><th class="n">Cost</th><th class="n">Gain</th><th class="n">OCF</th><th class="n">OCF £/yr</th><th class="n">Dividends</th><th></th></tr></thead>
       <tbody>${all.map(h => `<tr>
@@ -522,11 +557,13 @@ async function viewAccount(id) {
         <td class="n">${fmt(h.value)}</td><td class="n">${fmt(h.cost)}</td>
         <td class="n ${cls(h.gain)}">${signed(h.gain)}${h.cost > 0 ? `<div style="font-size:11px">${pct(h.gain / h.cost * 100, 1)}</div>` : ''}</td>
         <td class="n">${pct(h.ocf_pct, 2)}</td><td class="n">${fmt(h.ocf_annual)}</td><td class="n">${fmt(h.dividends || 0)}</td>
-        <td class="actions"><button class="sm ghost" data-chart="${h.id}">Chart</button><button class="sm ghost" data-price="${h.id}">+ Price</button>
+        <td class="actions"><button class="sm ghost" data-chart="${h.id}">Chart</button><button class="sm ghost" data-units="${h.id}">Set units</button><button class="sm ghost" data-price="${h.id}">+ Price</button>
           ${h.price_symbol ? `<button class="sm ghost" data-fetch="${h.id}">Fetch</button>` : ''}<button class="sm ghost" data-edit="${h.id}">Edit</button><button class="sm ghost danger" data-del="${h.id}">✕</button></td>
       </tr>`).join('') || '<tr><td colspan="10" class="muted">No holdings yet – add one, then record buys as transactions.</td></tr>'}</tbody></table></div>
       <div id="price-chart"></div></div>`;
     $('#b-addh').onclick = () => holdingForm(null, a.id);
+    if ($('#b-open')) $('#b-open').onclick = () => openingForm(all);
+    $$('[data-units]', T).forEach(b => b.onclick = () => setUnitsForm(H(b.dataset.units)));
     const H = id => all.find(h => h.id == id);
     $$('[data-edit]', T).forEach(b => b.onclick = () => holdingForm(H(b.dataset.edit)));
     $$('[data-price]', T).forEach(b => b.onclick = () => priceForm(H(b.dataset.price)));
@@ -595,7 +632,7 @@ function recurringCards(recs) {
     <div class="card"><div class="card-head"><h2>${esc(r.label)} ${r.active ? '' : '<span class="tag">paused</span>'}</h2>
       <div class="btns"><button class="sm" data-amt="${r.id}">New amount</button><button class="sm ghost" data-redit="${r.id}">Edit</button>
       <button class="sm ghost" data-rebuild="${r.id}">Rebuild</button><button class="sm ghost danger" data-rdel="${r.id}">✕</button></div></div>
-      <div class="muted" style="margin-bottom:8px">${esc(r.account_name)} · ${esc(RULES[r.rule])}${r.rule.startsWith('day_') ? ` (${r.day})` : ''} · from ${fdate(r.start_date)}${r.end_date ? ` to ${fdate(r.end_date)}` : ''}${r.tax_relief_pct ? ` · +${r.tax_relief_pct}% tax relief` : ''}</div>
+      <div class="muted" style="margin-bottom:8px">${esc(r.account_name)} · ${esc(RULES[r.rule])}${r.rule.startsWith('day_') ? ` (${r.day})` : ''} · from ${fdate(r.start_date)}${r.end_date ? ` to ${fdate(r.end_date)}` : ''}${r.tax_relief_pct ? ` · +${r.tax_relief_pct}% tax relief` : ''}${r.invest_holding_id ? ` · invests in ${esc((HOLDINGS.find(h => h.id === r.invest_holding_id) || {}).ticker || 'fund')}` : ''}</div>
       <table><thead><tr><th>Amount from</th><th class="n">Amount</th><th>Notes</th><th></th></tr></thead><tbody>
       ${r.amounts.map(x => `<tr><td>${fdate(x.effective_from)}</td><td class="n">${fmt(x.amount)}</td><td class="muted">${esc(x.notes || '')}</td><td class="actions"><button class="sm ghost danger" data-adel="${x.id}">✕</button></td></tr>`).join('')}
       </tbody></table></div>`).join('')}</div>`;
@@ -613,7 +650,7 @@ function bindRecurring(el, recs) {
 
 async function viewRecurring() {
   if (!SUMMARY) await loadSummary();
-  const [recs, up] = await Promise.all([api('recurring'), api('upcoming?months=12')]);
+  const [recs, up] = await Promise.all([api('recurring'), api('upcoming?months=12'), loadHoldings()]);
   view.innerHTML = `
     <div class="page-head"><div><h1>Recurring payments</h1><div class="sub">Pension contributions and regular deposits, created automatically on each pay date</div></div>
       <button class="primary" id="b-add">Add recurring payment</button></div>

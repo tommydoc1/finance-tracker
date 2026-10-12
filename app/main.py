@@ -77,11 +77,11 @@ def background_loop():
     while True:
         try:
             with db() as con:
+                if AUTO_PRICES:
+                    services.refresh_all_prices(con)
                 n = services.generate_recurring(con)
                 if n:
                     log.info("created %s recurring transactions", n)
-                if AUTO_PRICES:
-                    services.refresh_all_prices(con)
         except Exception as e:
             log.warning("background job failed: %s", e)
         time.sleep(REFRESH_HOURS * 3600)
@@ -101,11 +101,12 @@ FIELDS = {
     "transactions": ["account_id", "date", "type", "amount", "holding_id", "units", "notes"],
     "rates": ["account_id", "kind", "effective_date", "value", "notes"],
     "valuations": ["account_id", "date", "value", "notes"],
-    "recurring": ["account_id", "label", "txn_type", "rule", "day", "start_date", "end_date", "tax_relief_pct", "active"],
+    "recurring": ["account_id", "label", "txn_type", "rule", "day", "start_date", "end_date", "tax_relief_pct", "active",
+                  "invest_holding_id"],
     "recurring_amounts": ["recurring_id", "effective_from", "amount", "notes"],
 }
 TXN_TYPES = {"deposit", "withdrawal", "contribution", "tax_relief", "transfer_in", "transfer_out",
-             "buy", "sell", "dividend", "interest", "fee", "bonus", "opening_balance"}
+             "buy", "sell", "dividend", "interest", "fee", "bonus", "opening_balance", "unit_adjust"}
 
 
 def _clean(table, data, partial=False):
@@ -113,7 +114,7 @@ def _clean(table, data, partial=False):
     for k in FIELDS[table]:
         if k in data:
             v = data[k]
-            out[k] = None if v == "" and k in ("holding_id", "units", "end_date", "opened_on") else v
+            out[k] = None if v == "" and k in ("holding_id", "units", "end_date", "opened_on", "invest_holding_id") else v
     if table == "transactions":
         if "type" in out and out["type"] not in TXN_TYPES:
             raise HTTPException(400, f"unknown transaction type {out['type']}")
@@ -212,6 +213,46 @@ def delete_transaction(item_id: int):
 def list_holdings():
     with db() as con:
         return rows(con.execute("SELECT * FROM holdings ORDER BY account_id, ticker"))
+
+
+def _units_held(con, hid, on):
+    r = con.execute(
+        "SELECT COALESCE(SUM(CASE type WHEN 'buy' THEN units WHEN 'unit_adjust' THEN units WHEN 'sell' THEN -units ELSE 0 END),0) AS u "
+        "FROM transactions WHERE holding_id=? AND date<=? AND units IS NOT NULL", (hid, on)).fetchone()
+    return r["u"]
+
+
+@app.post("/api/holdings/{hid}/opening")
+def opening_position(hid: int, body: dict = Body(...)):
+    """Start tracking a fund you already hold: records what you've paid in so far and the units it bought."""
+    day, units, paid = body.get("date"), float(body.get("units") or 0), abs(float(body.get("paid_in") or 0))
+    if not day or units <= 0 or paid <= 0:
+        raise HTTPException(400, "date, units and paid_in are required")
+    with db() as con:
+        h = con.execute("SELECT * FROM holdings WHERE id=?", (hid,)).fetchone()
+        if not h:
+            raise HTTPException(404)
+        con.execute("INSERT INTO transactions(account_id,date,type,amount,notes) VALUES(?,?,'opening_balance',?,?)",
+                    (h["account_id"], day, paid, f"Paid in before tracking ({h['ticker']})"))
+        con.execute("INSERT INTO transactions(account_id,date,type,amount,holding_id,units,notes) VALUES(?,?,'buy',?,?,?,?)",
+                    (h["account_id"], day, paid, hid, units, "Opening position"))
+        services.generate_recurring(con)
+    return {"ok": True}
+
+
+@app.post("/api/holdings/{hid}/set-units")
+def set_units(hid: int, body: dict = Body(...)):
+    """Match the unit count your provider shows: adds a unit adjustment for any difference."""
+    day, actual = body.get("date") or date.today().isoformat(), float(body.get("units"))
+    with db() as con:
+        h = con.execute("SELECT * FROM holdings WHERE id=?", (hid,)).fetchone()
+        if not h:
+            raise HTTPException(404)
+        diff = round(actual - _units_held(con, hid, day), 6)
+        if abs(diff) > 1e-6:
+            con.execute("INSERT INTO transactions(account_id,date,type,amount,holding_id,units,notes) VALUES(?,?,'unit_adjust',0,?,?,?)",
+                        (h["account_id"], day, hid, diff, f"Matched provider unit count ({actual:g})"))
+    return {"adjusted_by": diff}
 
 
 @app.get("/api/holdings/{hid}/prices")
