@@ -142,7 +142,12 @@ def _update(table, item_id, data):
     if not data:
         raise HTTPException(400, "nothing to update")
     with db() as con:
+        old = con.execute(f"SELECT * FROM {table} WHERE id=?", (item_id,)).fetchone()
         con.execute(f"UPDATE {table} SET {','.join(f'{k}=?' for k in data)} WHERE id=?", [*data.values(), item_id])
+        if table == "holdings" and old and "price_symbol" in data and (data["price_symbol"] or "").strip() != (old["price_symbol"] or "").strip():
+            # symbol changed: prices fetched for the old symbol belong to a different security – drop them
+            con.execute("DELETE FROM prices WHERE holding_id=? AND source='auto'", (item_id,))
+            con.execute("UPDATE holdings SET price_info=NULL WHERE id=?", (item_id,))
         r = con.execute(f"SELECT * FROM {table} WHERE id=?", (item_id,)).fetchone()
         if not r:
             raise HTTPException(404)
@@ -287,7 +292,8 @@ def fetch_holding(hid: int, range: str = "max"):
             n = services.fetch_prices(con, dict(h), range)
         except Exception as e:
             raise HTTPException(502, f"Price fetch failed: {e}")
-    return {"prices": n}
+        info = con.execute("SELECT price_info FROM holdings WHERE id=?", (hid,)).fetchone()["price_info"]
+    return {"prices": n, "matched": info}
 
 
 @app.post("/api/prices/refresh")

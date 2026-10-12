@@ -53,7 +53,7 @@ async function api(path, opts = {}) {
 function toast(msg) {
   const t = $('#toast');
   t.textContent = msg; t.classList.add('show');
-  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2600);
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), Math.max(2600, msg.length * 55));
 }
 
 async function guard(fn, ok) {
@@ -240,14 +240,23 @@ function holdingForm(h, accountId) {
       { name: 'notes', label: 'Notes', full: true },
     ],
     onSubmit: async v => {
-      if (h) await api(`holdings/${h.id}`, { method: 'PUT', body: v });
-      else {
+      if (h) {
+        await api(`holdings/${h.id}`, { method: 'PUT', body: v });
+        if ((v.price_symbol || '').trim() !== (h.price_symbol || '').trim() && v.price_symbol) fetchAndReport({ ...h, ...v });
+      } else {
         const nh = await api('holdings', { method: 'POST', body: v });
-        if (nh.price_symbol) api(`holdings/${nh.id}/fetch?range=max`, { method: 'POST' }).then(r => { toast(`Fetched ${r.prices} prices for ${nh.ticker}`); route(); }).catch(e => toast('⚠ ' + e.message));
+        if (nh.price_symbol) fetchAndReport(nh);
       }
       toast('Saved'); route();
     },
   });
+}
+
+function fetchAndReport(h) {
+  toast(`Fetching prices for ${h.ticker}…`);
+  return api(`holdings/${h.id}/fetch?range=max`, { method: 'POST' })
+    .then(r => { toast(r.matched ? `${h.ticker}: matched ${r.matched} (${r.prices} prices)` : `Fetched ${r.prices} prices for ${h.ticker}`); route(); })
+    .catch(e => toast('⚠ ' + e.message));
 }
 
 function priceForm(h) {
@@ -551,7 +560,7 @@ async function viewAccount(id) {
       <div class="table-wrap"><table>
       <thead><tr><th>Ticker</th><th class="n">Units</th><th class="n">Price</th><th class="n">Value</th><th class="n">Cost</th><th class="n">Gain</th><th class="n">OCF</th><th class="n">OCF £/yr</th><th class="n">Dividends</th><th></th></tr></thead>
       <tbody>${all.map(h => `<tr>
-        <td><b>${esc(h.ticker)}</b><div class="muted" style="font-size:12px">${esc(h.name || '')}</div></td>
+        <td><b>${esc(h.ticker)}</b><div class="muted" style="font-size:12px">${esc(h.name || '')}</div>${h.price_info ? `<div class="muted" style="font-size:11px" title="What the price symbol ${esc(h.price_symbol)} matched">${esc(h.price_symbol)} → ${esc(h.price_info)}</div>` : ''}</td>
         <td class="n">${num(h.units)}</td>
         <td class="n">${h.price != null ? fmt(h.price) : '—'}<div class="muted" style="font-size:11px">${h.price_date ? fdate(h.price_date) : (h.price_symbol ? 'no price yet' : 'manual')}</div></td>
         <td class="n">${fmt(h.value)}</td><td class="n">${fmt(h.cost)}</td>
@@ -567,7 +576,7 @@ async function viewAccount(id) {
     const H = id => all.find(h => h.id == id);
     $$('[data-edit]', T).forEach(b => b.onclick = () => holdingForm(H(b.dataset.edit)));
     $$('[data-price]', T).forEach(b => b.onclick = () => priceForm(H(b.dataset.price)));
-    $$('[data-fetch]', T).forEach(b => b.onclick = () => guard(() => api(`holdings/${b.dataset.fetch}/fetch?range=max`, { method: 'POST' })).then(r => { toast(`Fetched ${r.prices} prices`); route(); }));
+    $$('[data-fetch]', T).forEach(b => b.onclick = () => fetchAndReport(H(b.dataset.fetch)));
     $$('[data-del]', T).forEach(b => b.onclick = () => confirmDo('Delete this holding and its price history? Transactions are kept.', () => guard(() => api(`holdings/${b.dataset.del}`, { method: 'DELETE' }), 'Deleted').then(route)));
     $$('[data-chart]', T).forEach(b => b.onclick = async () => {
       const h = H(b.dataset.chart), prices = await api(`holdings/${h.id}/prices`);

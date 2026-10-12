@@ -137,6 +137,7 @@ def db():
 MIGRATIONS = [
     # (table, column, definition) – added to existing databases on startup
     ("recurring", "invest_holding_id", "INTEGER REFERENCES holdings(id) ON DELETE SET NULL"),
+    ("holdings", "price_info", "TEXT"),  # what the price symbol matched, e.g. "Invesco EQQQ NASDAQ-100 UCITS ETF · LSE · GBp"
 ]
 
 

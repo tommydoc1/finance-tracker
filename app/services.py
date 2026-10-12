@@ -138,6 +138,10 @@ def _fx_to_gbp(client, currency):
     return float(r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"])
 
 
+def _set_price_info(con, holding_id, info):
+    con.execute("UPDATE holdings SET price_info=? WHERE id=?", (info, holding_id))
+
+
 def _store_price(con, holding_id, day, price):
     con.execute("INSERT INTO prices(holding_id,date,price,source) VALUES(?,?,?,'auto') "
                 "ON CONFLICT(holding_id,date) DO UPDATE SET price=excluded.price WHERE source='auto'",
@@ -194,6 +198,8 @@ def fetch_ft(con, holding, rng="5d"):
         r = client.get(f"{FT_BASE}/data/funds/tearsheet/historical", params={"s": f"{isin}:{cur}"})
         r.raise_for_status()
         xid, price_cur, latest = ft_parse_tearsheet(r.text)
+        tm = re.search(r"<title>\s*(.*?),\s*[A-Z]{2}[A-Z0-9]{10}", r.text, re.S)
+        _set_price_info(con, holding["id"], f"{tm.group(1).strip() if tm else isin} · FT.com · {price_cur or cur}")
         price_cur = price_cur or cur
         if price_cur in ("GBX", "GBp"):   # pence
             fx = 0.01
@@ -233,7 +239,10 @@ def fetch_prices(con, holding, rng="5d"):
         r = client.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}", params={"range": rng, "interval": "1d"}, headers=UA)
         r.raise_for_status()
         res = r.json()["chart"]["result"][0]
-        currency = res["meta"].get("currency", "GBP")
+        meta = res["meta"]
+        currency = meta.get("currency", "GBP")
+        _set_price_info(con, holding["id"], " · ".join(x for x in (meta.get("longName") or meta.get("shortName") or sym,
+                                                                   meta.get("exchangeName"), currency) if x))
         fx = _fx_to_gbp(client, currency)  # current FX applied to history: good enough for GBP-listed lines
         ts = res.get("timestamp") or []
         closes = (res.get("indicators", {}).get("quote") or [{}])[0].get("close") or []

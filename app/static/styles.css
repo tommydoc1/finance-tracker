@@ -146,7 +146,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft
 .statline div { font-size: 0.75rem; color: var(--muted); }
 .statline b { display: block; font-size: 0.9375rem; color: var(--ink); font-variant-numeric: tabular-nums; }
 
-#toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 10px; opacity: 0; transition: .2s; pointer-events: none; font-weight: 500; z-index: 10; }
+#toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 10px; opacity: 0; transition: .2s; pointer-events: none; font-weight: 500; z-index: 10; max-width: calc(100vw - 32px); text-align: center; }
 #toast.show { opacity: 1; transform: translateX(-50%); }
 
 @media (max-width: 900px) {
