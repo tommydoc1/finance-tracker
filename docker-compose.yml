@@ -1,0 +1,26 @@
+# Finance Tracker – Portainer stack
+#
+# Portainer: Stacks → Add stack → Web editor → paste this file.
+# Under "Environment variables" add APP_USERNAME and APP_PASSWORD (Portainer writes them to stack.env).
+# Change the volume path to wherever you keep container data.
+#
+# Auto-update: each push to main builds a new image (GitHub Actions → ghcr.io). A Watchtower
+# container that respects the label below pulls it and recreates this container; data in /data is kept.
+
+services:
+  finance:
+    image: ghcr.io/tommydoc1/finance-tracker:latest
+    container_name: finance-tracker
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file:
+      - stack.env                # APP_USERNAME, APP_PASSWORD
+    environment:
+      TZ: Europe/London
+      AUTO_PRICES: "true"        # daily ETF/fund prices from Yahoo Finance for holdings with a price symbol
+      REFRESH_HOURS: "6"         # how often prices refresh and recurring payments are generated
+    volumes:
+      - /srv/finance-tracker/data:/data   # SQLite database lives here – back this folder up
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
