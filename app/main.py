@@ -389,7 +389,8 @@ def _account_summary(a, st, txns, holds, rts, today):
     fee_pct = calc.rate_on(rts, "fee_pct", today) or 0.0
     fee_flat = calc.rate_on(rts, "fee_flat", today) or 0.0
     int_rate = calc.rate_on(rts, "interest", today)
-    interest_base = snap["value"] if a["valuation_mode"] == "manual" or a["type"] in ("cash", "cash_isa") else snap["cash"]
+    # interest is only ever earned on uninvested cash; statement-valued accounts have no cash/holdings split
+    interest_base = snap["value"] if a["valuation_mode"] == "manual" else snap["cash"]
     est_int_ty = calc.estimate_interest(st, rts, ty_start, today) if int_rate is not None else 0.0
     month_start = today.replace(day=1)
     est_int_month = calc.estimate_interest(st, rts, month_start, today) if int_rate is not None else 0.0
