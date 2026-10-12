@@ -179,7 +179,7 @@ const accountOptions = (filter = () => true) => (SUMMARY?.accounts || []).filter
 function accountForm(acc) {
   form({
     title: acc ? 'Edit account' : 'Add account',
-    initial: acc || { type: 'stocks_isa', valuation_mode: 'holdings' },
+    initial: acc ? { ...acc, interest_mode: acc.interest_mode || 'manual', interest_auto_from: acc.interest_auto_from || today() } : { type: 'stocks_isa', valuation_mode: 'holdings', interest_mode: 'manual', interest_auto_from: today() },
     hint: 'Valuation "from holdings" = cash + units × latest price (ISAs, cash accounts). "From statements" = you enter the value from your provider (typical for workplace pensions).',
     fields: [
       { name: 'name', label: 'Name', required: true, full: true, placeholder: 'e.g. Stocks & Shares ISA' },
@@ -187,6 +187,10 @@ function accountForm(acc) {
       { name: 'provider', label: 'Provider', placeholder: 'e.g. Vanguard, Aviva' },
       { name: 'valuation_mode', label: 'Valuation', type: 'select', options: [['holdings', 'From holdings & cash'], ['manual', 'From statements']] },
       { name: 'opened_on', label: 'Opened', type: 'date' },
+      { name: 'interest_mode', label: 'Interest on cash', type: 'select', full: true, show: v => v.valuation_mode === 'holdings',
+        options: [['manual', 'I\'ll record interest payments myself (or import them)'], ['daily', 'Calculate and credit daily, compounding (e.g. Trading 212)']] },
+      { name: 'interest_auto_from', label: 'Credit interest from', type: 'date', show: v => v.valuation_mode === 'holdings' && v.interest_mode === 'daily',
+        help: 'The first day to calculate. Interest you recorded before this date is kept as-is.' },
       ...(acc ? [{ name: 'archived', label: 'Status', type: 'select', options: [[0, 'Active'], [1, 'Archived (hidden)']] }] : []),
       { name: 'notes', label: 'Notes', type: 'textarea', full: true },
     ],
@@ -543,7 +547,7 @@ async function viewAccount(id) {
       <thead><tr><th>Date</th><th>Type</th><th>Holding</th><th class="n">Units</th><th class="n">Amount</th><th>Notes</th><th></th></tr></thead>
       <tbody>${txns.map(t => {
       const neg = ['withdrawal', 'transfer_out', 'buy', 'fee'].includes(t.type);
-      return `<tr><td>${fdate(t.date)}</td><td>${esc(TXN[t.type] || t.type)}${t.recurring_id ? ' <span class="tag">auto</span>' : ''}</td>
+      return `<tr><td>${fdate(t.date)}</td><td>${esc(TXN[t.type] || t.type)}${t.recurring_id || (t.external_id || '').startsWith('auto-interest:') ? ' <span class="tag">auto</span>' : ''}</td>
         <td>${esc(t.ticker || '')}</td><td class="n">${t.units ? num(t.units) : ''}</td>
         <td class="n ${neg ? 'down' : ''}">${neg ? '−' : ''}${fmt(t.amount)}</td><td class="muted">${esc(t.notes || '')}</td>
         <td class="actions"><button class="sm ghost" data-edit="${t.id}">Edit</button><button class="sm ghost danger" data-del="${t.id}">✕</button></td></tr>`;
@@ -598,7 +602,9 @@ async function viewAccount(id) {
           <td class="n">${r.kind === 'fee_flat' ? fmt(r.value) : pct(r.value, 3)}</td><td class="muted">${esc(r.notes || '')}</td>
           <td class="actions"><button class="sm ghost" data-edit="${r.id}">Edit</button><button class="sm ghost danger" data-del="${r.id}">✕</button></td></tr>`).join('')
       || '<tr><td colspan="5" class="muted">No rates recorded. Add your interest rate (AER) and any platform fee.</td></tr>'}</tbody></table></div>
-        <p class="note">Interest estimates use your daily cash balance × the rate in force on each day. Compare with the actual interest transactions you record to spot changes.</p>
+        <p class="note">${a.interest_mode === 'daily'
+          ? `Interest is credited automatically from ${fdate(a.interest_auto_from)}: every day, cash × ((1 + AER)^(1/365.25) − 1), rounded down to the penny and added to the balance so it compounds. Shown as one entry per month. Add a new row here whenever the rate changes.`
+          : 'Interest estimates use your daily cash balance × the rate in force on each day. Compare with the actual interest transactions you record to spot changes. To have interest credited automatically, edit the account and choose daily interest.'}</p>
       </div>
       <div class="card"><h2>Interest rate over time</h2><div class="chart-box sm">${a.rates.some(r => r.kind === 'interest') ? '<canvas id="c-rate"></canvas>' : '<div class="empty">No interest rates yet.</div>'}</div>
         <div class="statline"><div>Est. this month<b>${fmt(a.interest_est_month)}</b></div><div>Est. this TY<b>${fmt(a.interest_est_ty)}</b></div><div>Received this TY<b>${fmt(a.interest_ty)}</b></div></div>

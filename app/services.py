@@ -113,6 +113,79 @@ def _auto_invest(con, rec, skips):
     return made
 
 
+# ---------------------------------------------------------------- automatic daily interest
+
+AUTO_INT_PREFIX = "auto-interest:"
+
+
+def generate_auto_interest(con, today=None):
+    """For accounts set to daily interest: credit interest for every day from interest_auto_from to yesterday,
+    compounding (each day's interest is added to the cash balance before the next day is calculated).
+
+    Matches Trading 212's published method: daily payment = cash x ((1 + AER)^(1/365.25) - 1), rounded down to the
+    penny with the remainder carried to the next day. Days are grouped into one 'interest' transaction per month;
+    the current month's entry is updated on each run. Rate changes are taken from the account's rate history."""
+    today = today or date.today()
+    end = today - timedelta(days=1)  # interest for a day is paid once that day is over
+    changed = 0
+    for a in rows(con.execute("SELECT * FROM accounts")):
+        existing = {r["external_id"]: r for r in rows(con.execute(
+            "SELECT * FROM transactions WHERE account_id=? AND external_id LIKE ?", (a["id"], AUTO_INT_PREFIX + "%")))}
+        if a.get("interest_mode") != "daily" or not a.get("interest_auto_from") or a["valuation_mode"] != "holdings":
+            if existing:  # switched off: auto entries are derived data, remove them
+                con.execute("DELETE FROM transactions WHERE account_id=? AND external_id LIKE ?", (a["id"], AUTO_INT_PREFIX + "%"))
+                changed += len(existing)
+            continue
+        start = calc.d(a["interest_auto_from"])
+        rates = rows(con.execute("SELECT * FROM rates WHERE account_id=? AND kind='interest' ORDER BY effective_date, id", (a["id"],)))
+        txns = rows(con.execute(
+            "SELECT * FROM transactions WHERE account_id=? AND (external_id IS NULL OR external_id NOT LIKE ?) ORDER BY date, id",
+            (a["id"], AUTO_INT_PREFIX + "%")))
+        cash, i, carry = 0.0, 0, 0.0
+        months = {}  # 'YYYY-MM' -> [amount, last_day, days]
+        x = start
+        while i < len(txns) and calc.d(txns[i]["date"]) < start:
+            cash += calc.cash_effect(txns[i]); i += 1
+        while x <= end:
+            while i < len(txns) and calc.d(txns[i]["date"]) <= x:
+                cash += calc.cash_effect(txns[i]); i += 1
+            aer = calc.rate_on(rates, "interest", x) or 0.0
+            carry += max(cash, 0) * calc.daily_rate(aer)
+            pay = int(carry * 100 + 1e-9) / 100  # round down to the penny, keep the rest for tomorrow
+            carry -= pay
+            cash += pay
+            m = months.setdefault(x.strftime("%Y-%m"), [0.0, x, 0])
+            m[0] += pay; m[1] = x; m[2] += 1
+            x += timedelta(days=1)
+        for key, (amt, last, days) in months.items():
+            ext = AUTO_INT_PREFIX + key
+            amt = round(amt, 2)
+            note = f"Daily interest, compounded ({days} day{'s' if days != 1 else ''}, auto)"
+            old = existing.pop(ext, None)
+            if amt <= 0:
+                if old:
+                    con.execute("DELETE FROM transactions WHERE id=?", (old["id"],)); changed += 1
+                continue
+            if old:
+                if abs(old["amount"] - amt) > 0.004 or old["date"] != last.isoformat() or old["notes"] != note:
+                    con.execute("UPDATE transactions SET amount=?, date=?, notes=? WHERE id=?", (amt, last.isoformat(), note, old["id"]))
+                    changed += 1
+            else:
+                con.execute("INSERT INTO transactions(account_id,date,type,amount,notes,external_id) VALUES(?,?,'interest',?,?,?)",
+                            (a["id"], last.isoformat(), amt, note, ext))
+                changed += 1
+        for old in existing.values():  # months no longer in range (start date moved later)
+            con.execute("DELETE FROM transactions WHERE id=?", (old["id"],)); changed += 1
+    return changed
+
+
+def run_generators(con):
+    """Everything derived automatically: recurring payments (+ auto-invest) and daily interest."""
+    n = generate_recurring(con)
+    n += generate_auto_interest(con)
+    return n
+
+
 def upcoming(con, months=12):
     today = date.today()
     out = []
@@ -302,6 +375,8 @@ def import_trading212(con, account_id, text):
     """Import a Trading 212 'History' CSV export. Re-importing the same file is safe (dedup on the ID column)."""
     reader = csv.DictReader(io.StringIO(text.lstrip("﻿")))
     stats = {"imported": 0, "skipped": 0, "unknown": []}
+    acc = con.execute("SELECT interest_mode, interest_auto_from FROM accounts WHERE id=?", (account_id,)).fetchone()
+    auto_from = acc["interest_auto_from"] if acc and acc["interest_mode"] == "daily" else None
     for row in reader:
         action = _col(row, "Action").lower()
         when = _col(row, "Time")[:10]
@@ -315,6 +390,9 @@ def import_trading212(con, account_id, text):
             ttype = "dividend"
         elif "interest" in action:
             ttype = "interest"
+            if auto_from and when >= auto_from:  # already calculated automatically – don't count it twice
+                stats["skipped"] += 1
+                continue
         elif action == "deposit":
             ttype = "deposit"
         elif action == "withdrawal":

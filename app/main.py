@@ -79,7 +79,7 @@ def background_loop():
             with db() as con:
                 if AUTO_PRICES:
                     services.refresh_all_prices(con)
-                n = services.generate_recurring(con)
+                n = services.run_generators(con)
                 if n:
                     log.info("created %s recurring transactions", n)
         except Exception as e:
@@ -96,7 +96,8 @@ def startup():
 # ---------------------------------------------------------------- generic CRUD helpers
 
 FIELDS = {
-    "accounts": ["name", "type", "provider", "valuation_mode", "opened_on", "notes", "archived"],
+    "accounts": ["name", "type", "provider", "valuation_mode", "opened_on", "notes", "archived", "interest_mode",
+                 "interest_auto_from"],
     "holdings": ["account_id", "ticker", "name", "isin", "ocf_pct", "price_symbol", "notes"],
     "transactions": ["account_id", "date", "type", "amount", "holding_id", "units", "notes"],
     "rates": ["account_id", "kind", "effective_date", "value", "notes"],
@@ -114,7 +115,7 @@ def _clean(table, data, partial=False):
     for k in FIELDS[table]:
         if k in data:
             v = data[k]
-            out[k] = None if v == "" and k in ("holding_id", "units", "end_date", "opened_on", "invest_holding_id") else v
+            out[k] = None if v == "" and k in ("holding_id", "units", "end_date", "opened_on", "invest_holding_id", "interest_auto_from") else v
     if table == "transactions":
         if "type" in out and out["type"] not in TXN_TYPES:
             raise HTTPException(400, f"unknown transaction type {out['type']}")
@@ -133,7 +134,7 @@ def _insert(table, data):
     with db() as con:
         cur = con.execute(f"INSERT INTO {table}({','.join(data)}) VALUES({','.join('?' * len(data))})", list(data.values()))
         if table in ("recurring", "recurring_amounts"):
-            services.generate_recurring(con)
+            services.run_generators(con)
         return dict(con.execute(f"SELECT * FROM {table} WHERE id=?", (cur.lastrowid,)).fetchone())
 
 
@@ -241,7 +242,7 @@ def opening_position(hid: int, body: dict = Body(...)):
                     (h["account_id"], day, paid, f"Paid in before tracking ({h['ticker']})"))
         con.execute("INSERT INTO transactions(account_id,date,type,amount,holding_id,units,notes) VALUES(?,?,'buy',?,?,?,?)",
                     (h["account_id"], day, paid, hid, units, "Opening position"))
-        services.generate_recurring(con)
+        services.run_generators(con)
     return {"ok": True}
 
 
@@ -419,7 +420,7 @@ def _account_summary(a, st, txns, holds, rts, today):
 def summary():
     today = date.today()
     with db() as con:
-        services.generate_recurring(con)
+        services.run_generators(con)
         accounts, states, T, H, R, _ = _load(con)
         refreshed = get_setting(con, "prices_refreshed_at")
     accs = [_account_summary(a, states[a["id"]], T[a["id"]], H[a["id"]], R[a["id"]], today) for a in accounts]
@@ -460,7 +461,7 @@ def account_detail(aid: int):
         a = con.execute("SELECT * FROM accounts WHERE id=?", (aid,)).fetchone()
         if not a:
             raise HTTPException(404)
-        services.generate_recurring(con)
+        services.run_generators(con)
         accounts, states, T, H, R, _ = _load(con)
         detail = _account_summary(dict(a), states[aid], T[aid], H[aid], R[aid], date.today())
         detail["all_holdings"] = H[aid]

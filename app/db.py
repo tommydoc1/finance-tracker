@@ -137,7 +137,9 @@ def db():
 MIGRATIONS = [
     # (table, column, definition) – added to existing databases on startup
     ("recurring", "invest_holding_id", "INTEGER REFERENCES holdings(id) ON DELETE SET NULL"),
-    ("holdings", "price_info", "TEXT"),  # what the price symbol matched, e.g. "Invesco EQQQ NASDAQ-100 UCITS ETF · LSE · GBp"
+    ("holdings", "price_info", "TEXT"),
+    ("accounts", "interest_mode", "TEXT NOT NULL DEFAULT 'manual'"),  # manual | daily (auto-credit, compounding)
+    ("accounts", "interest_auto_from", "TEXT"),                        # first day auto-interest is calculated for  # what the price symbol matched, e.g. "Invesco EQQQ NASDAQ-100 UCITS ETF · LSE · GBp"
 ]
 
 

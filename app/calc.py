@@ -252,8 +252,14 @@ def sample_dates(start, end, max_points=400):
 
 # ---------------------------------------------------------------- interest
 
+def daily_rate(aer_pct):
+    """Daily rate equivalent to an AER, as Trading 212 and most UK savings providers calculate it:
+    (1 + AER)^(1/365.25) - 1. Paying this every day and compounding it yields exactly the AER over a year."""
+    return (1 + (aer_pct or 0) / 100) ** (1 / 365.25) - 1
+
+
 def estimate_interest(state: AccountState, rates, start, end):
-    """Sum of daily interest on cash balance using the rate history (AER treated as simple daily)."""
+    """Sum of daily interest on the cash balance using the rate history (AER converted to a daily rate)."""
     if not any(r["kind"] == "interest" for r in rates):
         return 0.0
     total = 0.0
@@ -271,7 +277,7 @@ def estimate_interest(state: AccountState, rates, start, end):
             cash += cash_effect(txns[i]); i += 1
         bal = state.snapshot(x)["value"] if manual else cash
         r = rate_on(rates, "interest", x) or 0.0
-        total += max(bal, 0) * r / 100 / 365
+        total += max(bal, 0) * daily_rate(r)
         x += timedelta(days=1)
     return total
 
