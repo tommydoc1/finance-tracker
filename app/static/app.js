@@ -232,8 +232,8 @@ async function txnForm(txn, accountId) {
 function holdingForm(h, accountId) {
   form({
     title: h ? 'Edit holding' : 'Add holding',
-    initial: h || { account_id: accountId },
-    hint: 'Price symbol is used for automatic daily prices. ETFs and shares: the Yahoo Finance code – LSE lines end in .L (e.g. VUAG.L, VWRP.L). Pension and unit-trust funds with no ticker: the fund\'s ISIN (e.g. GB00B0ZDNB53), priced from FT.com. Pence are converted to £ automatically. Leave blank to enter prices by hand.',
+    initial: h ? { ...h, dividend_mode: h.dividend_mode || 'none', dividends_auto_from: h.dividends_auto_from || '' } : { account_id: accountId, dividend_mode: 'none' },
+    hint: 'Dividends are worked out from Yahoo\'s published amounts × the units you held the day before each ex-dividend date. Price symbol is used for automatic daily prices. ETFs and shares: the Yahoo Finance code – LSE lines end in .L (e.g. VUAG.L, VWRP.L). Pension and unit-trust funds with no ticker: the fund\'s ISIN (e.g. GB00B0ZDNB53), priced from FT.com. Pence are converted to £ automatically. Leave blank to enter prices by hand.',
     fields: [
       { name: 'account_id', label: 'Account', type: 'select', options: accountOptions(), full: true },
       { name: 'ticker', label: 'Ticker', required: true, placeholder: 'VUAG' },
@@ -241,12 +241,20 @@ function holdingForm(h, accountId) {
       { name: 'name', label: 'Name', full: true, placeholder: 'Vanguard S&P 500 UCITS ETF' },
       { name: 'isin', label: 'ISIN' },
       { name: 'ocf_pct', label: 'OCF / TER (% per year)', type: 'number', step: '0.001' },
+      { name: 'dividend_mode', label: 'Dividends', type: 'select', full: true, options: [
+        ['none', 'None / accumulating – income already in the price (Acc funds, LQQ3, pension funds)'],
+        ['cash', 'Distributing – paid out as cash (added automatically from Yahoo)'],
+        ['reinvest', 'Distributing – reinvested into more units (added automatically from Yahoo)']] },
+      { name: 'dividends_auto_from', label: 'Add dividends from (ex-date)', type: 'date', show: v => v.dividend_mode !== 'none',
+        help: 'Blank = every dividend while you held it. Set a date if you already recorded or imported earlier ones.' },
       { name: 'notes', label: 'Notes', full: true },
     ],
     onSubmit: async v => {
       if (h) {
         await api(`holdings/${h.id}`, { method: 'PUT', body: v });
-        if ((v.price_symbol || '').trim() !== (h.price_symbol || '').trim() && v.price_symbol) fetchAndReport({ ...h, ...v });
+        const symChanged = (v.price_symbol || '').trim() !== (h.price_symbol || '').trim();
+        const divsOn = v.dividend_mode !== 'none' && v.dividend_mode !== (h.dividend_mode || 'none');
+        if (v.price_symbol && (symChanged || divsOn)) fetchAndReport({ ...h, ...v }); // full history incl. dividends
       } else {
         const nh = await api('holdings', { method: 'POST', body: v });
         if (nh.price_symbol) fetchAndReport(nh);
@@ -547,7 +555,7 @@ async function viewAccount(id) {
       <thead><tr><th>Date</th><th>Type</th><th>Holding</th><th class="n">Units</th><th class="n">Amount</th><th>Notes</th><th></th></tr></thead>
       <tbody>${txns.map(t => {
       const neg = ['withdrawal', 'transfer_out', 'buy', 'fee'].includes(t.type);
-      return `<tr><td>${fdate(t.date)}</td><td>${esc(TXN[t.type] || t.type)}${t.recurring_id || (t.external_id || '').startsWith('auto-interest:') ? ' <span class="tag">auto</span>' : ''}</td>
+      return `<tr><td>${fdate(t.date)}</td><td>${esc(TXN[t.type] || t.type)}${t.recurring_id || /^auto-(interest|div|drip):/.test(t.external_id || '') ? ' <span class="tag">auto</span>' : ''}</td>
         <td>${esc(t.ticker || '')}</td><td class="n">${t.units ? num(t.units) : ''}</td>
         <td class="n ${neg ? 'down' : ''}">${neg ? '−' : ''}${fmt(t.amount)}</td><td class="muted">${esc(t.notes || '')}</td>
         <td class="actions"><button class="sm ghost" data-edit="${t.id}">Edit</button><button class="sm ghost danger" data-del="${t.id}">✕</button></td></tr>`;
@@ -564,7 +572,7 @@ async function viewAccount(id) {
       <div class="table-wrap"><table>
       <thead><tr><th>Ticker</th><th class="n">Units</th><th class="n">Price</th><th class="n">Value</th><th class="n">Cost</th><th class="n">Gain</th><th class="n">OCF</th><th class="n">OCF £/yr</th><th class="n">Dividends</th><th></th></tr></thead>
       <tbody>${all.map(h => `<tr>
-        <td><b>${esc(h.ticker)}</b><div class="muted" style="font-size:12px">${esc(h.name || '')}</div>${h.price_info ? `<div class="muted" style="font-size:11px" title="What the price symbol ${esc(h.price_symbol)} matched">${esc(h.price_symbol)} → ${esc(h.price_info)}</div>` : ''}</td>
+        <td><b>${esc(h.ticker)}</b><div class="muted" style="font-size:12px">${esc(h.name || '')}</div>${h.dividend_mode && h.dividend_mode !== 'none' ? `<span class="tag" style="margin-top:3px;display:inline-block">${h.dividend_mode === 'reinvest' ? 'divs reinvested' : 'divs as cash'}</span>` : ''}${h.price_info ? `<div class="muted" style="font-size:11px" title="What the price symbol ${esc(h.price_symbol)} matched">${esc(h.price_symbol)} → ${esc(h.price_info)}</div>` : ''}</td>
         <td class="n">${num(h.units)}</td>
         <td class="n">${h.price != null ? fmt(h.price) : '—'}<div class="muted" style="font-size:11px">${h.price_date ? fdate(h.price_date) : (h.price_symbol ? 'no price yet' : 'manual')}</div></td>
         <td class="n">${fmt(h.value)}</td><td class="n">${fmt(h.cost)}</td>

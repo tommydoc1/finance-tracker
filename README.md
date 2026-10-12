@@ -9,6 +9,8 @@ A self-hosted personal finance tracker for UK ISAs, cash savings and pensions. O
 - **Auto-invest**: recurring contributions can buy units of a fund at that day's price; **Set units** reconciles with the count your provider shows
 - **Interest rate history** per account – every change is kept, and interest is estimated daily from your actual balance × the rate in force that day
 - **Charges**: platform % fee, flat monthly fees, and each fund's OCF/TER → estimated £/year, plus actual fees you record
+- **Automatic dividends**: distributing ETFs get each dividend from Yahoo (units held before the ex-date × amount per share), paid as cash or **reinvested** into more units
+- **Daily compounding interest** on cash (Trading 212's AER method), credited automatically
 - **Dividend & interest income** by month, tax year and holding
 - **Recurring payments** – e.g. a monthly pension contribution, auto-created on the last working day of each month (weekends + England & Wales bank holidays handled). Add a "new amount" from April for pay rises; past months keep the old figure
 - Growth: value vs paid-in over time, gain £/%, annualised return (XIRR)

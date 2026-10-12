@@ -179,9 +179,79 @@ def generate_auto_interest(con, today=None):
     return changed
 
 
+# ---------------------------------------------------------------- automatic dividends (+ reinvestment)
+
+AUTO_DIV_PREFIX = "auto-div:"
+AUTO_DRIP_PREFIX = "auto-drip:"
+
+
+def _units_before(con, hid, day):
+    """Units held at the close of the day before `day` – who qualifies for a dividend with that ex-date."""
+    r = con.execute(
+        "SELECT COALESCE(SUM(CASE type WHEN 'buy' THEN units WHEN 'unit_adjust' THEN units WHEN 'sell' THEN -units ELSE 0 END),0) u "
+        "FROM transactions WHERE holding_id=? AND date<? AND units IS NOT NULL", (hid, day)).fetchone()
+    return r["u"] or 0.0
+
+
+def generate_auto_dividends(con, today=None):
+    """For holdings set to 'cash' or 'reinvest': one dividend per ex-date = units held x amount per share
+    (rounded down to the penny). 'reinvest' also buys units with it at that day's price, so later dividends are
+    paid on the extra units too. Recalculated in date order every run, so back-dated buys/sells flow through."""
+    today = (today or date.today()).isoformat()
+    changed = 0
+    for h in rows(con.execute("SELECT * FROM holdings")):
+        auto = {r["external_id"]: r for r in rows(con.execute(
+            "SELECT * FROM transactions WHERE holding_id=? AND (external_id LIKE ? OR external_id LIKE ?)",
+            (h["id"], AUTO_DIV_PREFIX + "%", AUTO_DRIP_PREFIX + "%")))}
+        mode = h.get("dividend_mode") or "none"
+        if mode not in ("cash", "reinvest"):
+            if auto:
+                con.execute("DELETE FROM transactions WHERE holding_id=? AND (external_id LIKE ? OR external_id LIKE ?)",
+                            (h["id"], AUTO_DIV_PREFIX + "%", AUTO_DRIP_PREFIX + "%"))
+                changed += len(auto)
+            continue
+        since = h.get("dividends_auto_from") or "0000-00-00"
+        events = rows(con.execute("SELECT * FROM dividend_events WHERE holding_id=? AND ex_date>=? AND ex_date<=? ORDER BY ex_date",
+                                  (h["id"], since, today)))
+        keep = set()
+        for ev in events:
+            ex = ev["ex_date"]
+            dkey, bkey = f"{AUTO_DIV_PREFIX}{h['id']}:{ex}", f"{AUTO_DRIP_PREFIX}{h['id']}:{ex}"
+            units = _units_before(con, h["id"], ex)
+            amt = int(max(units, 0) * ev["per_share"] * 100 + 1e-9) / 100
+            if amt <= 0:
+                continue
+            note = f"{h['ticker']} dividend: {units:g} units × £{ev['per_share']:.4f} (auto)"
+            changed += _upsert_auto(con, auto.get(dkey), dkey, h["account_id"], ex, "dividend", amt, h["id"], None, note)
+            keep.add(dkey)
+            if mode == "reinvest":
+                pdate, price = price_near(con, h["id"], calc.d(ex))
+                if price:
+                    changed += _upsert_auto(con, auto.get(bkey), bkey, h["account_id"], ex, "buy", amt, h["id"],
+                                            round(amt / price, 6), f"Dividend reinvested @ £{price:.4f} ({pdate}, auto)")
+                    keep.add(bkey)
+        for ext, old in auto.items():  # events no longer applicable (start date moved, mode changed to cash, …)
+            if ext not in keep:
+                con.execute("DELETE FROM transactions WHERE id=?", (old["id"],)); changed += 1
+    return changed
+
+
+def _upsert_auto(con, old, ext, account_id, day, ttype, amount, hid, units, note):
+    if old:
+        if abs(old["amount"] - amount) > 0.004 or (units is not None and abs((old["units"] or 0) - units) > 1e-7) or old["notes"] != note:
+            con.execute("UPDATE transactions SET amount=?, units=?, notes=?, date=? WHERE id=?", (amount, units, note, day, old["id"]))
+            return 1
+        return 0
+    con.execute("INSERT INTO transactions(account_id,date,type,amount,holding_id,units,notes,external_id) VALUES(?,?,?,?,?,?,?,?)",
+                (account_id, day, ttype, amount, hid, units, note, ext))
+    return 1
+
+
 def run_generators(con):
-    """Everything derived automatically: recurring payments (+ auto-invest) and daily interest."""
+    """Everything derived automatically: recurring payments (+ auto-invest), dividends (+ reinvest), daily interest.
+    Dividends run before interest so cash dividends earn interest from the day they arrive."""
     n = generate_recurring(con)
+    n += generate_auto_dividends(con)
     n += generate_auto_interest(con)
     return n
 
@@ -266,7 +336,7 @@ def ft_parse_history(html):
 def fetch_ft(con, holding, rng="5d"):
     m = ISIN_SYMBOL.match(holding["price_symbol"].strip())
     isin, cur = m.group(1).upper(), (m.group(2) or "GBP").upper()
-    years = {"5d": 0, "1y": 1, "5y": 5, "max": 15}.get(rng, 1)
+    years = {"5d": 0, "1mo": 0, "1y": 1, "5y": 5, "max": 15}.get(rng, 1)
     with httpx.Client(timeout=30, follow_redirects=True, headers=FT_HEADERS) as client:
         r = client.get(f"{FT_BASE}/data/funds/tearsheet/historical", params={"s": f"{isin}:{cur}"})
         r.raise_for_status()
@@ -309,7 +379,8 @@ def fetch_prices(con, holding, rng="5d"):
     if is_ft_symbol(sym):
         return fetch_ft(con, holding, rng)
     with httpx.Client(timeout=20, follow_redirects=True) as client:
-        r = client.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}", params={"range": rng, "interval": "1d"}, headers=UA)
+        r = client.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
+                       params={"range": rng, "interval": "1d", "events": "div"}, headers=UA)
         r.raise_for_status()
         res = r.json()["chart"]["result"][0]
         meta = res["meta"]
@@ -319,6 +390,12 @@ def fetch_prices(con, holding, rng="5d"):
         fx = _fx_to_gbp(client, currency)  # current FX applied to history: good enough for GBP-listed lines
         ts = res.get("timestamp") or []
         closes = (res.get("indicators", {}).get("quote") or [{}])[0].get("close") or []
+        divs = (res.get("events") or {}).get("dividends") or {}
+    for dv in divs.values():  # per-share amounts are in the quote currency (pence for GBp lines), same as prices
+        if dv.get("amount") and dv.get("date"):
+            con.execute("INSERT INTO dividend_events(holding_id,ex_date,per_share) VALUES(?,?,?) "
+                        "ON CONFLICT(holding_id,ex_date) DO UPDATE SET per_share=excluded.per_share",
+                        (holding["id"], datetime.utcfromtimestamp(dv["date"]).date().isoformat(), round(dv["amount"] * fx, 8)))
     n = 0
     for t, c in zip(ts, closes):
         if c is None:
@@ -329,7 +406,7 @@ def fetch_prices(con, holding, rng="5d"):
     return n
 
 
-def refresh_all_prices(con, rng="5d"):
+def refresh_all_prices(con, rng="1mo"):  # a month back each run: catches any missed days and dividends
     results = {}
     for h in rows(con.execute("SELECT * FROM holdings WHERE price_symbol <> ''")):
         try:
@@ -417,6 +494,11 @@ def import_trading212(con, account_id, text):
                 hid = h["id"]
             if ttype in ("buy", "sell"):
                 units = abs(_f(_col(row, "No. of shares")))
+        if ttype == "dividend" and hid:
+            hm = con.execute("SELECT dividend_mode, dividends_auto_from FROM holdings WHERE id=?", (hid,)).fetchone()
+            if hm and hm["dividend_mode"] in ("cash", "reinvest") and when >= (hm["dividends_auto_from"] or ""):
+                stats["skipped"] += 1  # calculated automatically from Yahoo – don't count it twice
+                continue
         cur = con.execute(
             "INSERT OR IGNORE INTO transactions(account_id,date,type,amount,holding_id,units,notes,external_id) VALUES(?,?,?,?,?,?,?,?)",
             (account_id, when, ttype, round(total, 2), hid, units, f"T212: {_col(row, 'Action')}", ext))

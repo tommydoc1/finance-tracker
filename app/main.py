@@ -98,7 +98,7 @@ def startup():
 FIELDS = {
     "accounts": ["name", "type", "provider", "valuation_mode", "opened_on", "notes", "archived", "interest_mode",
                  "interest_auto_from"],
-    "holdings": ["account_id", "ticker", "name", "isin", "ocf_pct", "price_symbol", "notes"],
+    "holdings": ["account_id", "ticker", "name", "isin", "ocf_pct", "price_symbol", "notes", "dividend_mode", "dividends_auto_from"],
     "transactions": ["account_id", "date", "type", "amount", "holding_id", "units", "notes"],
     "rates": ["account_id", "kind", "effective_date", "value", "notes"],
     "valuations": ["account_id", "date", "value", "notes"],
@@ -115,7 +115,7 @@ def _clean(table, data, partial=False):
     for k in FIELDS[table]:
         if k in data:
             v = data[k]
-            out[k] = None if v == "" and k in ("holding_id", "units", "end_date", "opened_on", "invest_holding_id", "interest_auto_from") else v
+            out[k] = None if v == "" and k in ("holding_id", "units", "end_date", "opened_on", "invest_holding_id", "interest_auto_from", "dividends_auto_from") else v
     if table == "transactions":
         if "type" in out and out["type"] not in TXN_TYPES:
             raise HTTPException(400, f"unknown transaction type {out['type']}")
@@ -133,7 +133,7 @@ def _insert(table, data):
     data = _clean(table, data)
     with db() as con:
         cur = con.execute(f"INSERT INTO {table}({','.join(data)}) VALUES({','.join('?' * len(data))})", list(data.values()))
-        if table in ("recurring", "recurring_amounts"):
+        if table in ("recurring", "recurring_amounts", "holdings", "rates", "transactions", "accounts"):
             services.run_generators(con)
         return dict(con.execute(f"SELECT * FROM {table} WHERE id=?", (cur.lastrowid,)).fetchone())
 
@@ -553,7 +553,7 @@ def put_ui_settings(body: dict = Body(...)):
 
 # ---------------------------------------------------------------- export / import
 
-TABLES = ["accounts", "holdings", "prices", "recurring", "recurring_amounts", "recurring_skips", "transactions",
+TABLES = ["accounts", "holdings", "prices", "dividend_events", "recurring", "recurring_amounts", "recurring_skips", "transactions",
           "rates", "valuations", "settings"]
 
 

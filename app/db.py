@@ -105,6 +105,14 @@ CREATE TABLE IF NOT EXISTS recurring_skips (
     PRIMARY KEY (recurring_id, recurring_key)
 );
 
+-- Dividend events (ex-date + amount per share in GBP) as published by the price source
+CREATE TABLE IF NOT EXISTS dividend_events (
+    holding_id INTEGER NOT NULL REFERENCES holdings(id) ON DELETE CASCADE,
+    ex_date TEXT NOT NULL,
+    per_share REAL NOT NULL,
+    PRIMARY KEY (holding_id, ex_date)
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -139,7 +147,9 @@ MIGRATIONS = [
     ("recurring", "invest_holding_id", "INTEGER REFERENCES holdings(id) ON DELETE SET NULL"),
     ("holdings", "price_info", "TEXT"),
     ("accounts", "interest_mode", "TEXT NOT NULL DEFAULT 'manual'"),  # manual | daily (auto-credit, compounding)
-    ("accounts", "interest_auto_from", "TEXT"),                        # first day auto-interest is calculated for  # what the price symbol matched, e.g. "Invesco EQQQ NASDAQ-100 UCITS ETF · LSE · GBp"
+    ("accounts", "interest_auto_from", "TEXT"),                        # first day auto-interest is calculated for
+    ("holdings", "dividend_mode", "TEXT NOT NULL DEFAULT 'none'"),     # none (accumulating) | cash | reinvest
+    ("holdings", "dividends_auto_from", "TEXT"),                       # only ex-dates on/after this (blank = all)  # what the price symbol matched, e.g. "Invesco EQQQ NASDAQ-100 UCITS ETF · LSE · GBp"
 ]
 
 
