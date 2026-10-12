@@ -23,8 +23,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("finance")
 
 APP_VERSION = os.environ.get("APP_VERSION", "dev")
-USER = os.environ.get("APP_USERNAME", "admin")
-PASSWORD = os.environ.get("APP_PASSWORD", "")
+def _env_secret(name, default=""):
+    """Read a credential from the environment, ignoring stray whitespace or wrapping quotes from .env/Portainer."""
+    v = os.environ.get(name, default).strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        v = v[1:-1]
+    return v
+
+
+USER = _env_secret("APP_USERNAME", "admin") or "admin"
+PASSWORD = _env_secret("APP_PASSWORD")
 AUTO_PRICES = os.environ.get("AUTO_PRICES", "true").lower() == "true"
 REFRESH_HOURS = float(os.environ.get("REFRESH_HOURS", "6"))
 STATIC = Path(__file__).parent / "static"
@@ -41,9 +49,22 @@ async def basic_auth(request: Request, call_next):
         hdr = request.headers.get("authorization", "")
         if hdr.startswith("Basic "):
             try:
-                u, _, p = base64.b64decode(hdr[6:]).decode().partition(":")
-                ok = secrets.compare_digest(u, USER) and secrets.compare_digest(p, PASSWORD)
-            except Exception:
+                raw = base64.b64decode(hdr[6:].strip())
+                try:
+                    creds = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    creds = raw.decode("latin-1")
+                u, _, p = creds.partition(":")
+                # compare as bytes: compare_digest raises on non-ASCII str (e.g. a £ in the password)
+                user_ok = secrets.compare_digest(u.encode(), USER.encode())
+                pass_ok = secrets.compare_digest(p.encode(), PASSWORD.encode())
+                ok = user_ok and pass_ok
+                if not ok:  # explain the failure in the container log, never the password itself
+                    log.warning("login failed from %s: %s", request.client.host if request.client else "?",
+                                "wrong username (got %r, expected %r)" % (u, USER) if not user_ok
+                                else "wrong password (got %d characters, expected %d)" % (len(p), len(PASSWORD)))
+            except Exception as e:
+                log.warning("login failed: unreadable credentials (%s)", e)
                 ok = False
         if not ok:
             return Response("Authentication required", 401, {"WWW-Authenticate": 'Basic realm="Finance Tracker"'})
