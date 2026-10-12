@@ -371,6 +371,12 @@ def _paid_in_warnings(a, st, snap, today):
         if snap["cash"] < -1:
             w.append(f"Cash is {snap['cash']:,.2f} – there are buys or withdrawals without the deposits that paid for them, "
                      "so paid in is understated. Add the missing deposits or an Opening balance.")
+        has_position = any(t["type"] == "buy" and (t.get("notes") or "") == "Opening position" for t in st.txns)
+        extra_ob = [t for t in st.txns if t["type"] == "opening_balance" and not (t.get("notes") or "").startswith("Paid in before tracking")]
+        if has_position and extra_ob and snap["cash"] > 1:
+            w.append(f"An extra Opening balance of £{sum(t['amount'] for t in extra_ob):,.2f} was added on top of "
+                     "\"Add existing position\", which already records what was paid in – so the money is counted twice "
+                     "(it shows up as cash). Delete that opening balance on the Transactions tab unless it really is uninvested cash.")
         no_cost = sum(h["value"] for h in snap["holdings"].values() if h["cost"] <= 0.01 and h["value"] > 1)
         if no_cost > 1:
             w.append(f"£{no_cost:,.2f} of holdings have no purchase cost (e.g. added with Set units). Use "

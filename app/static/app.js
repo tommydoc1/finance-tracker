@@ -75,6 +75,8 @@ function form({ title, fields, initial = {}, hint = '', submit = 'Save', onSubmi
       input = `<select name="${f.name}" ${req}>${opts.map(([k, l]) => `<option value="${esc(k)}" ${String(k) === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
     } else if (f.type === 'textarea') {
       input = `<textarea name="${f.name}" rows="2">${esc(v)}</textarea>`;
+    } else if (f.type === 'info') {
+      return `<div class="full form-info" data-field="${f.name}">${f.text}</div>`;
     } else if (f.type === 'file') {
       input = `<input type="file" name="${f.name}" accept="${f.accept || ''}" ${req}>`;
     } else {
@@ -86,6 +88,7 @@ function form({ title, fields, initial = {}, hint = '', submit = 'Save', onSubmi
   const values = () => {
     const out = {};
     for (const f of fields) {
+      if (f.type === 'info') continue;
       const el = body.querySelector(`[name="${f.name}"]`);
       if (f.type === 'file') { out[f.name] = el.files[0]; continue; }
       let v = el.value;
@@ -101,6 +104,7 @@ function form({ title, fields, initial = {}, hint = '', submit = 'Save', onSubmi
       const show = !f.show || f.show(vals);
       lab.style.display = show ? '' : 'none';
       const el = lab.querySelector('[name]');
+      if (!el) continue;
       if (f.required) el.required = show;
       if (f.type === 'select' && typeof f.options === 'function' && f.dynamic) {
         const cur = el.value;
@@ -115,7 +119,7 @@ function form({ title, fields, initial = {}, hint = '', submit = 'Save', onSubmi
   frm.onsubmit = async e => {
     e.preventDefault();
     const vals = values();
-    for (const f of fields) if (f.show && !f.show(vals)) delete vals[f.name];
+    for (const f of fields) if (f.type === 'info' || (f.show && !f.show(vals))) delete vals[f.name];
     try {
       $('#modal-submit').disabled = true;
       await onSubmit(vals);
@@ -226,6 +230,8 @@ async function txnForm(txn, accountId) {
       { name: 'amount', label: 'Amount (£)', type: 'number', step: '0.01', required: true },
       { name: 'holding_id', label: 'Holding', type: 'select', options: holdOpts, dynamic: true, show: needsHolding },
       { name: 'units', label: 'Units / shares', type: 'number', show: v => ['buy', 'sell'].includes(v.type), required: true },
+      { name: 'ob_warn', type: 'info', show: v => v.type === 'opening_balance' && HOLDINGS.some(h => String(h.account_id) === String(v.account_id)),
+        text: '⚠ This account has holdings. An opening balance is recorded as <b>cash</b>, so only use it for uninvested cash. For shares or fund units, use <b>Add existing position</b> on the Holdings tab instead – it records the units and what you paid in. Adding both counts the money twice.' },
       { name: 'notes', label: 'Notes', full: true },
     ],
     onSubmit: async v => {
@@ -291,7 +297,7 @@ function priceForm(h) {
 function openingForm(holdings) {
   form({
     title: 'Add existing position', initial: { holding_id: holdings[0]?.id, date: today() },
-    hint: 'For a fund you already hold when you start tracking (e.g. your pension). Enter the units your provider shows today and the total paid in so far (yours + employer + tax relief). Growth is then value minus paid in. Contributions from this date on are added by your recurring payment.',
+    hint: 'For a fund you already hold when you start tracking (e.g. your pension). Enter the units your provider shows today and the total paid in so far (yours + employer + tax relief). Growth is then value minus paid in. Contributions from this date on are added by your recurring payment. This also records the amount as paid in, so don\'t add a separate opening balance for it.',
     fields: [
       { name: 'holding_id', label: 'Fund', type: 'select', options: holdings.map(h => [h.id, h.ticker + (h.name ? ' – ' + h.name : '')]), full: true },
       { name: 'date', label: 'As of', type: 'date', required: true },
