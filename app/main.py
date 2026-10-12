@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 
 from . import calc, services
-from .db import db, get_setting, init, rows
+from .db import db, get_setting, init, rows, set_setting
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("finance")
@@ -466,6 +466,41 @@ def income():
             by_holding[t["ticker"] or "(unassigned)"] += t["amount"]
     return {"by_tax_year": by_ty, "by_month": by_month, "by_holding": by_holding, "by_account": by_account,
             "recent": list(reversed(txs[-50:]))}
+
+
+# ---------------------------------------------------------------- appearance settings
+
+UI_DEFAULTS = {"theme": "auto", "accent": "", "size": "normal"}
+UI_CHOICES = {"theme": {"auto", "light", "dark", "black", "midnight", "paper"},
+              "size": {"small", "normal", "large", "xlarge"}}
+
+
+@app.get("/api/settings/ui")
+def get_ui_settings():
+    with db() as con:
+        raw = get_setting(con, "ui")
+    try:
+        saved = json.loads(raw) if raw else {}
+    except ValueError:
+        saved = {}
+    return {**UI_DEFAULTS, **{k: v for k, v in saved.items() if k in UI_DEFAULTS}}
+
+
+@app.put("/api/settings/ui")
+def put_ui_settings(body: dict = Body(...)):
+    cur = get_ui_settings()
+    for k, v in body.items():
+        if k not in UI_DEFAULTS:
+            continue
+        if k in UI_CHOICES and v not in UI_CHOICES[k]:
+            raise HTTPException(400, f"invalid {k}: {v}")
+        if k == "accent" and v and not (isinstance(v, str) and len(v) == 7 and v.startswith("#")
+                                        and all(c in "0123456789abcdefABCDEF" for c in v[1:])):
+            raise HTTPException(400, "accent must be a #rrggbb colour or empty")
+        cur[k] = v
+    with db() as con:
+        set_setting(con, "ui", json.dumps(cur))
+    return cur
 
 
 # ---------------------------------------------------------------- export / import

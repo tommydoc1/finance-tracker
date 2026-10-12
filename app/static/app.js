@@ -688,12 +688,74 @@ function t212Form(accountId) {
   });
 }
 
+// ------------------------------------------------------------ appearance
+const THEMES = {
+  auto: { name: 'Auto (match device)', pv: ['#f4f3ef', '#ffffff', '#1c1f1e', '#1f6f5c'], pv2: ['#121514', '#1a1e1d', '#e8ebe9', '#5cc0a2'] },
+  light: { name: 'Light', pv: ['#f4f3ef', '#ffffff', '#1c1f1e', '#1f6f5c'] },
+  dark: { name: 'Dark', pv: ['#121514', '#1a1e1d', '#e8ebe9', '#5cc0a2'] },
+  black: { name: 'Black & white', pv: ['#000000', '#000000', '#ffffff', '#ffffff'] },
+  midnight: { name: 'Midnight blue', pv: ['#0b1220', '#111a2e', '#e6ebf5', '#6aa6ff'] },
+  paper: { name: 'Paper', pv: ['#efe6d4', '#faf5ea', '#33291d', '#8a4b1f'] },
+};
+const ACCENTS = [['', 'Theme default'], ['#1f6f5c', 'Green'], ['#0f8b8d', 'Teal'], ['#2f6fd6', 'Blue'], ['#7b4fc9', 'Purple'],
+  ['#d6336c', 'Pink'], ['#c2413a', 'Red'], ['#d9822b', 'Orange'], ['#b8860b', 'Gold'], ['#5b6470', 'Slate']];
+const SIZES = { small: ['Small', 0.92], normal: ['Normal', 1], large: ['Large', 1.12], xlarge: ['Extra large', 1.25] };
+let UI = { theme: 'auto', accent: '', size: 'normal' };
+
+function onColour(hex) { // black or white text, whichever reads better on this colour
+  const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255).map(c => c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.4 ? '#000000' : '#ffffff';
+}
+
+function applyUI(p) {
+  UI = { ...UI, ...p };
+  const root = document.documentElement, st = root.style;
+  root.dataset.theme = THEMES[UI.theme] ? UI.theme : 'auto';
+  if (UI.accent) {
+    const on = onColour(UI.accent);
+    st.setProperty('--accent', UI.accent); st.setProperty('--c1', UI.accent);
+    st.setProperty('--accent-soft', `color-mix(in srgb, ${UI.accent} 18%, var(--panel))`);
+    st.setProperty('--on-accent', on);
+    st.setProperty('--on-accent-muted', on === '#ffffff' ? 'rgba(255,255,255,.8)' : 'rgba(0,0,0,.7)');
+  } else ['--accent', '--c1', '--accent-soft', '--on-accent', '--on-accent-muted'].forEach(v => st.removeProperty(v));
+  const scale = (SIZES[UI.size] || SIZES.normal)[1];
+  st.setProperty('--text-scale', scale);
+  if (window.Chart) Chart.defaults.font.size = Math.round(12 * scale);
+  try { localStorage.setItem('ui', JSON.stringify(UI)); } catch { /* storage unavailable */ }
+}
+
+async function saveUI(p) {
+  applyUI(p);
+  await guard(() => api('settings/ui', { method: 'PUT', body: UI }));
+  route(); // redraw so charts pick up the new colours
+}
+
+function appearanceCard() {
+  const tile = (k, t) => {
+    const [bg, panel, ink, acc] = t.pv, d = t.pv2;
+    const pv = `<div class="pv" style="background:${d ? `linear-gradient(135deg, ${bg} 50%, ${d[0]} 50%)` : bg}">
+      <div class="side" style="background:${panel};border:1px solid ${ink}22"></div>
+      <div class="main" style="background:${panel};border:1px solid ${ink}22"><div class="ln" style="background:${acc};width:55%"></div>
+      <div class="ln" style="background:${ink};opacity:.7"></div><div class="ln" style="background:${ink};opacity:.35;width:70%"></div></div></div>`;
+    return `<button class="theme-tile ${UI.theme === k ? 'active' : ''}" data-theme-pick="${k}">${pv}<div class="nm">${esc(t.name)}</div></button>`;
+  };
+  return `<div class="card" style="grid-column:1/-1"><h2>Appearance</h2>
+    <div class="settings-label">Theme</div>
+    <div class="theme-grid">${Object.entries(THEMES).map(([k, t]) => tile(k, t)).join('')}</div>
+    <div class="settings-label">Accent colour</div>
+    <div class="swatches">${ACCENTS.map(([c, n]) => `<button class="swatch ${c ? '' : 'default'} ${UI.accent === c ? 'active' : ''}" data-accent="${c}" title="${n}" aria-label="${n}" style="${c ? `background:${c}` : ''}"></button>`).join('')}</div>
+    <div class="settings-label">Text size</div>
+    <div><div class="seg">${Object.entries(SIZES).map(([k, [n]]) => `<button data-size="${k}" class="${UI.size === k ? 'active' : ''}">${n}</button>`).join('')}</div></div>
+    <p class="note">Saved on the server, so it applies on every device you sign in from.</p></div>`;
+}
+
 async function viewData() {
   if (!SUMMARY) await loadSummary();
   const health = await api('health');
   view.innerHTML = `
-    <div class="page-head"><div><h1>Data &amp; settings</h1><div class="sub">Version ${esc(health.version)}</div></div></div>
+    <div class="page-head"><div><h1>Data &amp; settings</h1><div class="sub">Version ${esc(String(health.version).slice(0, 7))}</div></div></div>
     <div class="grid g2">
+      ${appearanceCard()}
       <div class="card"><h2>Backup</h2><p class="muted">Your data lives in one SQLite file in the container's <code>/data</code> volume. Download a JSON backup regularly – it can be restored here.</p>
         <div class="btns"><a href="/api/export"><button class="primary">Download backup (JSON)</button></a><a href="/api/export/transactions.csv"><button>Transactions (CSV)</button></a><button id="b-restore" class="danger">Restore backup…</button></div></div>
       <div class="card"><h2>Imports</h2><p class="muted">Bring in history from your broker instead of typing it.</p>
@@ -704,6 +766,9 @@ async function viewData() {
         <div class="btns"><button id="b-bh">Sync from gov.uk</button></div>
         <div id="paydates" class="note"></div></div>
     </div>`;
+  $$('[data-theme-pick]').forEach(b => b.onclick = () => saveUI({ theme: b.dataset.themePick }));
+  $$('[data-accent]').forEach(b => b.onclick = () => saveUI({ accent: b.dataset.accent }));
+  $$('[data-size]').forEach(b => b.onclick = () => saveUI({ size: b.dataset.size }));
   $('#b-t212').onclick = () => t212Form();
   $('#b-prices').onclick = () => guard(() => api('prices/refresh', { method: 'POST' }), 'Prices refreshed');
   $('#b-bh').onclick = () => guard(() => api('bank-holidays/sync', { method: 'POST' })).then(r => toast(`Synced ${r.dates} bank holidays`));
@@ -738,4 +803,12 @@ async function route() {
   if (SUMMARY) $('#foot').textContent = `v${String(SUMMARY.version).slice(0, 7)} · ${SUMMARY.tax_year}`;
 }
 window.addEventListener('hashchange', route);
+// re-draw charts when the device switches light/dark while on "Auto"
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => { if (UI.theme === 'auto') route(); });
+try { applyUI(JSON.parse(localStorage.getItem('ui') || '{}')); } catch { applyUI({}); }
+api('settings/ui').then(p => {
+  const changed = JSON.stringify({ ...UI, ...p }) !== JSON.stringify(UI);
+  applyUI(p);
+  if (changed) route();
+}).catch(() => { /* keep cached appearance */ });
 route();
