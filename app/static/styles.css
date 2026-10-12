@@ -178,3 +178,14 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft
 .seg button:last-child { border-right: 0; }
 .seg button.active { background: var(--accent); color: var(--on-accent); }
 .settings-label { font-size: 0.75rem; font-weight: 600; color: var(--muted); }
+
+/* overview: hide toggle + notices */
+.acct .top-r { display: flex; align-items: center; gap: 4px; }
+.icon.eye { font-size: inherit; padding: 4px; border-radius: 6px; display: inline-flex; color: var(--muted); }
+.icon.eye:hover { background: var(--panel-2); color: var(--ink); }
+.acct.is-hidden { opacity: .6; }
+.acct.is-hidden:hover { opacity: 1; }
+.card.notice { border-color: var(--warn); }
+.warn-row { padding: 4px 0; font-size: 0.8125rem; }
+.warn-row + .warn-row { border-top: 1px dashed var(--line); }
+.warn-row a { color: var(--accent); }

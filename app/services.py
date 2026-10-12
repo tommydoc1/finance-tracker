@@ -256,10 +256,11 @@ def run_generators(con):
     return n
 
 
-def upcoming(con, months=12):
+def upcoming(con, months=12, include_hidden=True):
     today = date.today()
     out = []
-    for rec in rows(con.execute("SELECT r.*, a.name AS account_name FROM recurring r JOIN accounts a ON a.id=r.account_id WHERE r.active=1")):
+    for rec in rows(con.execute("SELECT r.*, a.name AS account_name FROM recurring r JOIN accounts a ON a.id=r.account_id "
+                                "WHERE r.active=1 AND a.archived=0" + ("" if include_hidden else " AND a.hidden=0"))):
         amounts = rows(con.execute("SELECT * FROM recurring_amounts WHERE recurring_id=?", (rec["id"],)))
         horizon = today + timedelta(days=31 * months)
         for key, pd in schedule_dates(con, rec, horizon):

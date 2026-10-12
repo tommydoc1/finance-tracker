@@ -148,6 +148,7 @@ MIGRATIONS = [
     ("holdings", "price_info", "TEXT"),
     ("accounts", "interest_mode", "TEXT NOT NULL DEFAULT 'manual'"),  # manual | daily (auto-credit, compounding)
     ("accounts", "interest_auto_from", "TEXT"),                        # first day auto-interest is calculated for
+    ("accounts", "hidden", "INTEGER NOT NULL DEFAULT 0"),               # 1 = left out of overview totals
     ("holdings", "dividend_mode", "TEXT NOT NULL DEFAULT 'none'"),     # none (accumulating) | cash | reinvest
     ("holdings", "dividends_auto_from", "TEXT"),                       # only ex-dates on/after this (blank = all)  # what the price symbol matched, e.g. "Invesco EQQQ NASDAQ-100 UCITS ETF · LSE · GBp"
 ]

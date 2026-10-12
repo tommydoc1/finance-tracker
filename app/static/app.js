@@ -171,7 +171,14 @@ function growthChart(canvas, points, { stacked = false, accounts = [] } = {}) {
 // ------------------------------------------------------------ shared data
 let HOLDINGS = [];
 let SUMMARY = null;
-async function loadSummary() { SUMMARY = await api('summary'); return SUMMARY; }
+const showHidden = () => { try { return localStorage.getItem('showHidden') === '1'; } catch { return false; } };
+async function loadSummary(incl = false) { SUMMARY = await api('summary' + (incl ? '?include_hidden=true' : '')); return SUMMARY; }
+const eyeIcon = hidden => `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>${hidden ? '<path d="M3 3l18 18"/>' : ''}</svg>`;
+async function toggleHidden(a) {
+  await guard(() => api(`accounts/${a.id}`, { method: 'PUT', body: { hidden: a.hidden ? 0 : 1 } }),
+    a.hidden ? `${a.name} shown on the overview again` : `${a.name} hidden from the overview totals`);
+  route();
+}
 async function loadHoldings() { HOLDINGS = await api('holdings'); return HOLDINGS; }
 const accountOptions = (filter = () => true) => (SUMMARY?.accounts || []).filter(a => !a.archived && filter(a)).map(a => [a.id, a.name]);
 
@@ -179,7 +186,7 @@ const accountOptions = (filter = () => true) => (SUMMARY?.accounts || []).filter
 function accountForm(acc) {
   form({
     title: acc ? 'Edit account' : 'Add account',
-    initial: acc ? { ...acc, interest_mode: acc.interest_mode || 'manual', interest_auto_from: acc.interest_auto_from || today() } : { type: 'stocks_isa', valuation_mode: 'holdings', interest_mode: 'manual', interest_auto_from: today() },
+    initial: acc ? { ...acc, hidden: acc.hidden ? 1 : 0, interest_mode: acc.interest_mode || 'manual', interest_auto_from: acc.interest_auto_from || today() } : { type: 'stocks_isa', valuation_mode: 'holdings', interest_mode: 'manual', interest_auto_from: today(), hidden: 0 },
     hint: 'Valuation "from holdings" = cash + units × latest price (ISAs, cash accounts). "From statements" = you enter the value from your provider (typical for workplace pensions).',
     fields: [
       { name: 'name', label: 'Name', required: true, full: true, placeholder: 'e.g. Stocks & Shares ISA' },
@@ -191,7 +198,8 @@ function accountForm(acc) {
         options: [['manual', 'I\'ll record interest payments myself (or import them)'], ['daily', 'Calculate and credit daily, compounding (e.g. Trading 212)']] },
       { name: 'interest_auto_from', label: 'Credit interest from', type: 'date', show: v => v.valuation_mode === 'holdings' && v.interest_mode === 'daily',
         help: 'The first day to calculate. Interest you recorded before this date is kept as-is.' },
-      ...(acc ? [{ name: 'archived', label: 'Status', type: 'select', options: [[0, 'Active'], [1, 'Archived (hidden)']] }] : []),
+      ...(acc ? [{ name: 'archived', label: 'Status', type: 'select', options: [[0, 'Active'], [1, 'Archived (closed account)']] }] : []),
+      { name: 'hidden', label: 'Overview', type: 'select', options: [[0, 'Count in overview totals'], [1, 'Hide from overview totals (e.g. pension)']] },
       { name: 'notes', label: 'Notes', type: 'textarea', full: true },
     ],
     onSubmit: async v => {
@@ -400,16 +408,23 @@ function kpi(label, value, sub = '', extra = '') {
 const typeTag = t => `<span class="tag ${ISA.includes(t) ? 'isa' : ''}">${esc(ACCOUNT_TYPES[t] || t)}</span>`;
 
 async function viewDashboard() {
-  const [s, up] = await Promise.all([loadSummary(), api('upcoming?months=3')]);
+  const incl = showHidden();
+  const [s, up] = await Promise.all([loadSummary(incl), api(`upcoming?months=3&include_hidden=${incl}`)]);
   const t = s.totals, isa = s.isa;
-  const live = s.accounts.filter(a => !a.archived);
+  const active = s.accounts.filter(a => !a.archived);
+  const live = active.filter(a => incl || !a.hidden);          // accounts counted in the totals
+  const hiddenAccts = active.filter(a => a.hidden);
+  const warned = live.filter(a => a.warnings && a.warnings.length);
   const gainPct = t.contributed > 0 ? t.gain / t.contributed * 100 : null;
   const isaPct = Math.min(100, isa.used / isa.allowance * 100);
   view.innerHTML = `
     <div class="page-head">
-      <div><h1>Overview</h1><div class="sub">Tax year ${s.tax_year} · ${fdate(s.today)}</div></div>
-      <div class="btns"><button id="b-refresh">Refresh prices</button><button class="primary" id="b-txn">Add transaction</button></div>
+      <div><h1>Overview</h1><div class="sub">Tax year ${s.tax_year} · ${fdate(s.today)}${s.hidden_count ? ` · ${incl ? 'including' : 'excluding'} ${s.hidden_count} hidden account${s.hidden_count > 1 ? 's' : ''}` : ''}</div></div>
+      <div class="btns">${s.hidden_count ? `<button id="b-showhidden" class="${incl ? 'primary' : ''}" title="Include hidden accounts in the totals">${eyeIcon(!incl)} ${incl ? 'Showing hidden' : 'Show hidden'}</button>` : ''}<button id="b-refresh">Refresh prices</button><button class="primary" id="b-txn">Add transaction</button></div>
     </div>
+    ${warned.length ? `<div class="card notice" style="margin-bottom:16px"><h2>Check paid-in records</h2>
+      <p class="muted" style="margin:0 0 8px">Growth compares value with what's recorded as paid in. These accounts look incomplete, which inflates the growth figures:</p>
+      ${warned.map(a => `<div class="warn-row"><a href="#/account/${a.id}"><b>${esc(a.name)}</b></a> – ${a.warnings.map(esc).join(' ')}</div>`).join('')}</div>` : ''}
     ${live.length ? '' : `<div class="empty card" style="margin-bottom:16px">No accounts yet. <button class="link" id="b-first">Add your first account</button> – e.g. your Stocks &amp; Shares ISA, cash account and pension.</div>`}
     <div class="kpis">
       ${kpi('Net worth', fmt(t.value), `${signed(t.gain)} all-time`, 'hero')}
@@ -444,9 +459,16 @@ async function viewDashboard() {
     </div>
     <h2 style="margin:24px 0 12px">Accounts</h2>
     <div class="acct-cards">
-      ${live.map(a => `
-        <a class="card acct" href="#/account/${a.id}">
-          <div class="top"><b>${esc(a.name)}</b>${typeTag(a.type)}</div>
+      ${active.filter(a => !a.hidden).map(a => acctCard(a)).join('')}
+      <button class="card acct empty" id="b-add-acct" style="cursor:pointer">+ Add account</button>
+    </div>
+    ${hiddenAccts.length ? `<h2 style="margin:24px 0 4px">Hidden from overview</h2>
+      <p class="muted" style="margin:0 0 12px">${incl ? 'Currently included in the totals above.' : 'Not counted in the totals above.'} Click the eye to show an account again.</p>
+      <div class="acct-cards hidden-cards">${hiddenAccts.map(a => acctCard(a)).join('')}</div>` : ''}`;
+  function acctCard(a) {
+    return `
+        <a class="card acct ${a.hidden ? 'is-hidden' : ''}" href="#/account/${a.id}">
+          <div class="top"><b>${esc(a.name)}</b><span class="top-r">${typeTag(a.type)}<button class="icon eye" data-eye="${a.id}" title="${a.hidden ? 'Show on overview' : 'Hide from overview'}" aria-label="${a.hidden ? 'Show on overview' : 'Hide from overview'}">${eyeIcon(a.hidden)}</button></span></div>
           <div class="val">${fmt(a.value)}</div>
           <div class="${cls(a.gain)}" style="font-size:13px">${signed(a.gain)} ${a.gain_pct != null ? `(${pct(a.gain_pct, 1)})` : ''}</div>
           <div class="statline">
@@ -455,9 +477,11 @@ async function viewDashboard() {
             ${a.dividends_ty ? `<div>Divs TY<b>${fmt(a.dividends_ty)}</b></div>` : ''}
             ${a.valuation_mode === 'manual' && a.last_valuation ? `<div>Statement<b>${fdate(a.last_valuation.date)}</b></div>` : ''}
           </div>
-        </a>`).join('')}
-      <button class="card acct empty" id="b-add-acct" style="cursor:pointer">+ Add account</button>
-    </div>`;
+          ${a.warnings && a.warnings.length ? '<div class="warn" style="font-size:12px;margin-top:6px">⚠ Paid-in records look incomplete</div>' : ''}
+        </a>`;
+  }
+  $$('[data-eye]').forEach(b => b.onclick = e => { e.preventDefault(); e.stopPropagation(); toggleHidden(active.find(a => a.id == b.dataset.eye)); });
+  if ($('#b-showhidden')) $('#b-showhidden').onclick = () => { try { localStorage.setItem('showHidden', incl ? '0' : '1'); } catch { /* ignore */ } route(); };
 
   $('#b-txn').onclick = () => txnForm();
   $('#b-add-acct').onclick = () => accountForm();
@@ -468,7 +492,7 @@ async function viewDashboard() {
   const draw = async () => {
     charts.forEach(c => c.destroy()); charts = [];
     const start = range === 'All' ? '' : new Date(Date.now() - (range === '1Y' ? 365 : 1095) * 864e5).toISOString().slice(0, 10);
-    const ser = await api('series' + (start ? `?start=${start}` : ''));
+    const ser = await api(`series?include_hidden=${incl}` + (start ? `&start=${start}` : ''));
     if (ser.points.length) growthChart($('#c-growth'), ser.points, { stacked, accounts: ser.accounts });
   };
   $$('#ranges button').forEach(b => b.onclick = () => { range = b.dataset.r; $$('#ranges button').forEach(x => x.classList.toggle('primary', x === b)); draw(); });
@@ -482,16 +506,18 @@ async function viewAccounts() {
     <div class="page-head"><div><h1>Accounts</h1><div class="sub">${s.accounts.length} account${s.accounts.length === 1 ? '' : 's'}</div></div>
       <button class="primary" id="b-add">Add account</button></div>
     <div class="card"><div class="table-wrap"><table>
-      <thead><tr><th>Account</th><th>Type</th><th class="n">Value</th><th class="n">Paid in</th><th class="n">Gain</th><th class="n">XIRR</th><th class="n">Rate</th><th class="n">Charges/yr</th></tr></thead>
+      <thead><tr><th></th><th>Account</th><th>Type</th><th class="n">Value</th><th class="n">Paid in</th><th class="n">Gain</th><th class="n">XIRR</th><th class="n">Rate</th><th class="n">Charges/yr</th></tr></thead>
       <tbody>${s.accounts.map(a => `
         <tr style="cursor:pointer;${a.archived ? 'opacity:.55' : ''}" onclick="location.hash='#/account/${a.id}'">
-          <td><b>${esc(a.name)}</b><div class="muted" style="font-size:12px">${esc(a.provider || '')}${a.archived ? ' · archived' : ''}</div></td>
+          <td style="width:1%"><button class="icon eye" data-eye="${a.id}" title="${a.hidden ? 'Hidden from overview – click to show' : 'Shown on overview – click to hide'}">${eyeIcon(a.hidden)}</button></td>
+          <td><b>${esc(a.name)}</b><div class="muted" style="font-size:12px">${esc(a.provider || '')}${a.archived ? ' · archived' : ''}${a.hidden ? ' · hidden from overview' : ''}</div></td>
           <td>${typeTag(a.type)}</td><td class="n">${fmt(a.value)}</td><td class="n">${fmt(a.contributed)}</td>
           <td class="n ${cls(a.gain)}">${signed(a.gain)}</td><td class="n">${a.xirr == null ? '—' : pct(a.xirr * 100, 1)}</td>
           <td class="n">${a.interest_rate == null ? '—' : pct(a.interest_rate)}</td><td class="n">${fmt(a.charges_total_annual)}</td>
-        </tr>`).join('') || '<tr><td colspan="8" class="muted">No accounts yet.</td></tr>'}</tbody>
+        </tr>`).join('') || '<tr><td colspan="9" class="muted">No accounts yet.</td></tr>'}</tbody>
     </table></div></div>`;
   $('#b-add').onclick = () => accountForm();
+  $$('[data-eye]').forEach(b => b.onclick = e => { e.stopPropagation(); toggleHidden(s.accounts.find(a => a.id == b.dataset.eye)); });
 }
 
 const accTab = {};
@@ -525,6 +551,7 @@ async function viewAccount(id) {
       ${kpi('Est. charges / yr', fmt(a.charges_total_annual), `platform ${fmt(a.charges_platform_annual)} · funds ${fmt(a.charges_ocf_annual)}`)}
       ${ISA.includes(a.type) ? kpi(`ISA subs ${a.tax_year}`, fmt(a.isa_subscribed_ty), 'counts towards £20k') : ''}
     </div>
+    ${a.warnings && a.warnings.length ? `<div class="card notice" style="margin-bottom:16px">${a.warnings.map(w => `<div class="warn-row">⚠ ${esc(w)}</div>`).join('')}</div>` : ''}
     <div class="tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" class="${k === tab ? 'active' : ''}">${l}</button>`).join('')}</div>
     <div id="tab"></div>`;
 

@@ -97,7 +97,7 @@ def startup():
 
 FIELDS = {
     "accounts": ["name", "type", "provider", "valuation_mode", "opened_on", "notes", "archived", "interest_mode",
-                 "interest_auto_from"],
+                 "interest_auto_from", "hidden"],
     "holdings": ["account_id", "ticker", "name", "isin", "ocf_pct", "price_symbol", "notes", "dividend_mode", "dividends_auto_from"],
     "transactions": ["account_id", "date", "type", "amount", "holding_id", "units", "notes"],
     "rates": ["account_id", "kind", "effective_date", "value", "notes"],
@@ -324,9 +324,9 @@ def rebuild_recurring(rid: int):
 
 
 @app.get("/api/upcoming")
-def get_upcoming(months: int = 12):
+def get_upcoming(months: int = 12, include_hidden: bool = True):
     with db() as con:
-        return services.upcoming(con, months)
+        return services.upcoming(con, months, include_hidden)
 
 
 @app.get("/api/paydates")
@@ -358,6 +358,32 @@ def _load(con):
     T, V, H, R = by(txns), by(vals), by(holds), by(rts)
     states = {a["id"]: calc.AccountState(a, T[a["id"]], V[a["id"]], H[a["id"]], prices) for a in accounts}
     return accounts, states, T, H, R, prices
+
+
+def _paid_in_warnings(a, st, snap, today):
+    """Spot value with no matching 'paid in' record – it shows up as fake growth on the overview."""
+    w = []
+    value, paid = snap["value"], snap["contributed"]
+    if value > 1 and paid <= 0:
+        w.append("Nothing is recorded as paid in, so its whole value counts as growth. Add an Opening balance "
+                 "(what you'd paid in when you started tracking) or a deposit.")
+    if a["valuation_mode"] == "holdings":
+        if snap["cash"] < -1:
+            w.append(f"Cash is {snap['cash']:,.2f} – there are buys or withdrawals without the deposits that paid for them, "
+                     "so paid in is understated. Add the missing deposits or an Opening balance.")
+        no_cost = sum(h["value"] for h in snap["holdings"].values() if h["cost"] <= 0.01 and h["value"] > 1)
+        if no_cost > 1:
+            w.append(f"£{no_cost:,.2f} of holdings have no purchase cost (e.g. added with Set units). Use "
+                     "\"Add existing position\" on the Holdings tab to record what was paid for them.")
+    elif st.vals and paid > 0:
+        first = st.vals[0]
+        if st.snapshot(calc.d(first["date"]))["contributed"] <= 0:
+            w.append(f"The first statement value ({calc.d(first['date']).strftime('%d %b %Y')}) has nothing paid in "
+                     "recorded on or before it. Add an Opening balance dated the same day.")
+    if not w and paid > 0 and (value - paid) / paid > 3:
+        w.append(f"Growth of {(value - paid) / paid:.0%} looks unusually high – check that every deposit or "
+                 "opening balance has been recorded.")
+    return w
 
 
 def _account_summary(a, st, txns, holds, rts, today):
@@ -396,6 +422,7 @@ def _account_summary(a, st, txns, holds, rts, today):
     est_int_month = calc.estimate_interest(st, rts, month_start, today) if int_rate is not None else 0.0
     platform_cost = fee_pct * snap["value"] / 100 + fee_flat * 12
     return {
+        "warnings": _paid_in_warnings(a, st, snap, today),
         **a,
         "value": snap["value"], "cash": snap["cash"], "holdings_value": snap["holdings_value"],
         "contributed": snap["contributed"], "gain": snap["value"] - snap["contributed"],
@@ -418,14 +445,15 @@ def _account_summary(a, st, txns, holds, rts, today):
 
 
 @app.get("/api/summary")
-def summary():
+def summary(include_hidden: bool = False):
     today = date.today()
     with db() as con:
         services.run_generators(con)
         accounts, states, T, H, R, _ = _load(con)
         refreshed = get_setting(con, "prices_refreshed_at")
     accs = [_account_summary(a, states[a["id"]], T[a["id"]], H[a["id"]], R[a["id"]], today) for a in accounts]
-    live = [a for a in accs if not a["archived"]]
+    active = [a for a in accs if not a["archived"]]
+    live = [a for a in active if include_hidden or not a.get("hidden")]  # what the overview totals cover
     tot = lambda k: sum(a[k] or 0 for a in live)  # noqa: E731
     flows = []
     for a in live:
@@ -435,8 +463,8 @@ def summary():
                 flows.append((t["date"], -f))
     if tot("value"):
         flows.append((today.isoformat(), tot("value")))
-    isa_used = tot("isa_subscribed_ty")
-    lisa_used = sum(a["isa_subscribed_ty"] for a in live if a["type"] == "lisa")
+    isa_used = sum(a["isa_subscribed_ty"] for a in active)  # the allowance is a legal limit – count every ISA
+    lisa_used = sum(a["isa_subscribed_ty"] for a in active if a["type"] == "lisa")
     return {
         "today": today.isoformat(), "tax_year": calc.tax_year_of(today), "version": APP_VERSION,
         "prices_refreshed_at": refreshed,
@@ -448,6 +476,8 @@ def summary():
                 "lisa_used": lisa_used, "lisa_allowance": calc.LISA_ALLOWANCE,
                 "tax_year_end": calc.tax_year_bounds(calc.tax_year_of(today))[1].isoformat()},
         "accounts": accs,
+        "include_hidden": include_hidden,
+        "hidden_count": sum(1 for a in active if a.get("hidden")),
     }
 
 
@@ -473,12 +503,12 @@ def account_detail(aid: int):
 
 
 @app.get("/api/series")
-def series(account_id: int | None = None, start: str | None = None):
+def series(account_id: int | None = None, start: str | None = None, include_hidden: bool = False):
     """Value vs net contributions over time (whole portfolio or one account)."""
     today = date.today()
     with db() as con:
         accounts, states, T, *_ = _load(con)
-    ids = [account_id] if account_id else [a["id"] for a in accounts if not a["archived"]]
+    ids = [account_id] if account_id else [a["id"] for a in accounts if not a["archived"] and (include_hidden or not a["hidden"])]
     firsts = [calc.d(T[i][0]["date"]) for i in ids if T.get(i)]
     firsts += [calc.d(v["date"]) for i in ids for v in states[i].vals[:1]]
     if not firsts:
