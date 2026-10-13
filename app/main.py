@@ -182,7 +182,7 @@ for _t, _path in [("accounts", "accounts"), ("holdings", "holdings"), ("rates", 
 # ---------------------------------------------------------------- transactions
 
 @app.get("/api/transactions")
-def list_transactions(account_id: int | None = None, limit: int = 2000):
+def list_transactions(account_id: int | None = None, limit: int = 100000):
     q = ("SELECT t.*, a.name AS account_name, h.ticker FROM transactions t JOIN accounts a ON a.id=t.account_id "
          "LEFT JOIN holdings h ON h.id=t.holding_id")
     args = []
@@ -521,12 +521,14 @@ def series(account_id: int | None = None, start: str | None = None, include_hidd
         return {"points": [], "accounts": []}
     s = max(min(firsts), calc.d(start)) if start else min(firsts)
     pts = []
-    for x in calc.sample_dates(s, today):
+    dates = calc.sample_dates(s, today)
+    per_acct = {i: states[i].series(dates) for i in ids}
+    for n, x in enumerate(dates):
         row = {"date": x.isoformat(), "value": 0.0, "contributed": 0.0, "by_account": {}}
         for i in ids:
-            sn = states[i].snapshot(x)
-            row["value"] += sn["value"]; row["contributed"] += sn["contributed"]
-            row["by_account"][i] = round(sn["value"], 2)
+            v, c = per_acct[i][n]
+            row["value"] += v; row["contributed"] += c
+            row["by_account"][i] = round(v, 2)
         row["value"] = round(row["value"], 2); row["contributed"] = round(row["contributed"], 2)
         pts.append(row)
     return {"points": pts, "accounts": [{"id": a["id"], "name": a["name"]} for a in accounts if a["id"] in ids]}

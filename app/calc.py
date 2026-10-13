@@ -241,6 +241,54 @@ class AccountState:
                 "value": value, "last_valuation": val}
 
 
+    def series(self, dates):
+        """(value, contributed) at the end of each date in ascending `dates`, in a single pass over the
+        transactions – same results as calling snapshot() per date, but fast with many (e.g. daily) entries."""
+        txns = self.txns
+        tdates = [d(t["date"]) for t in txns]
+        # running sum of non-trade cash movements, for statement-valued accounts (value = statement + later flows)
+        nontrade = [0.0]
+        for t in txns:
+            nontrade.append(nontrade[-1] + (cash_effect(t) if t["type"] not in ("buy", "sell") else 0.0))
+        vdates = [d(v["date"]) for v in self.vals]
+        manual = self.a["valuation_mode"] == "manual"
+        cash = contributed = 0.0
+        units = defaultdict(float)
+        last_px = {}
+        i, out = 0, []
+        for x in dates:
+            while i < len(txns) and tdates[i] <= x:
+                t = txns[i]
+                cash += cash_effect(t)
+                contributed += external_flow(t)
+                hid, u = t.get("holding_id"), t.get("units")
+                if hid and u:
+                    if t["type"] == "buy":
+                        units[hid] += u; last_px[hid] = t["amount"] / u
+                    elif t["type"] == "unit_adjust":
+                        units[hid] += u
+                    elif t["type"] == "sell":
+                        units[hid] -= u; last_px[hid] = t["amount"] / u
+                i += 1
+            if manual:
+                j = bisect.bisect_right(vdates, x) - 1
+                if j >= 0:
+                    k = bisect.bisect_right(tdates, vdates[j])
+                    value = self.vals[j]["value"] + (nontrade[i] - nontrade[k])
+                else:
+                    value = contributed
+            else:
+                hv = 0.0
+                for hid, u in units.items():
+                    if abs(u) < 1e-9:
+                        continue
+                    p = self.prices.on(hid, x)
+                    hv += u * (p if p is not None else last_px.get(hid, 0.0))
+                value = cash + hv
+            out.append((value, contributed))
+        return out
+
+
 def sample_dates(start, end, max_points=400):
     days = (end - start).days
     step = max(1, days // max_points)

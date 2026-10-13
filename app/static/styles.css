@@ -190,3 +190,5 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft
 .warn-row + .warn-row { border-top: 1px dashed var(--line); }
 .warn-row a { color: var(--accent); }
 .form-info { font-size: 0.8125rem; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--warn); color: var(--ink); background: var(--panel-2); }
+.int-day td { font-size: 0.75rem; padding-top: 4px; padding-bottom: 4px; }
+.int-month td:first-child { font-weight: 600; }

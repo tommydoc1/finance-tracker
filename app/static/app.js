@@ -541,7 +541,9 @@ async function viewAccount(id) {
   if (!SUMMARY) await loadSummary();
   const [a, txns, ser] = await Promise.all([api(`accounts/${id}`), api(`transactions?account_id=${id}`), api(`series?account_id=${id}`)]);
   await loadHoldings();
-  const tabs = [['overview', 'Overview'], ['txns', `Transactions (${txns.length})`]];
+  const txnCount = txns.filter(t => !(t.external_id || '').startsWith('auto-interest:')).length
+    + new Set(txns.filter(t => (t.external_id || '').startsWith('auto-interest:')).map(t => t.date.slice(0, 7))).size;
+  const tabs = [['overview', 'Overview'], ['txns', `Transactions (${txnCount})`]];
   if (a.valuation_mode === 'holdings' && !['cash', 'cash_isa'].includes(a.type)) tabs.push(['holdings', 'Holdings']);
   tabs.push(['rates', 'Interest & fees']);
   if (a.valuation_mode === 'manual') tabs.push(['vals', 'Valuations']);
@@ -594,15 +596,39 @@ async function viewAccount(id) {
   }
 
   if (tab === 'txns') {
-    T.innerHTML = `<div class="card"><div class="table-wrap"><table>
-      <thead><tr><th>Date</th><th>Type</th><th>Holding</th><th class="n">Units</th><th class="n">Amount</th><th>Notes</th><th></th></tr></thead>
-      <tbody>${txns.map(t => {
+    // daily auto-interest entries are grouped into one expandable row per month
+    const isDaily = t => (t.external_id || '').startsWith('auto-interest:');
+    const rowsOut = [], months = {};
+    for (const t of txns) {
+      if (!isDaily(t)) { rowsOut.push(t); continue; }
+      const m = t.date.slice(0, 7);
+      if (!months[m]) { months[m] = { month: m, days: [], amount: 0, date: t.date }; rowsOut.push(months[m]); }
+      months[m].days.push(t); months[m].amount += t.amount;
+      if (t.date > months[m].date) months[m].date = t.date;
+    }
+    const txnRow = t => {
       const neg = ['withdrawal', 'transfer_out', 'buy', 'fee'].includes(t.type);
       return `<tr><td>${fdate(t.date)}</td><td>${esc(TXN[t.type] || t.type)}${t.recurring_id || /^auto-(interest|div|drip):/.test(t.external_id || '') ? ' <span class="tag">auto</span>' : ''}</td>
         <td>${esc(t.ticker || '')}</td><td class="n">${t.units ? num(t.units) : ''}</td>
         <td class="n ${neg ? 'down' : ''}">${neg ? '−' : ''}${fmt(t.amount)}</td><td class="muted">${esc(t.notes || '')}</td>
         <td class="actions"><button class="sm ghost" data-edit="${t.id}">Edit</button><button class="sm ghost danger" data-del="${t.id}">✕</button></td></tr>`;
-    }).join('') || '<tr><td colspan="7" class="muted">No transactions yet.</td></tr>'}</tbody></table></div></div>`;
+    };
+    const monthRow = g => {
+      const label = new Date(g.month + '-01T00:00').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+      return `<tr class="int-month"><td>${label}</td><td>Interest <span class="tag">auto</span></td><td></td><td></td>
+        <td class="n">${fmt(g.amount)}</td><td class="muted">Daily interest, compounded · ${g.days.length} day${g.days.length > 1 ? 's' : ''}</td>
+        <td class="actions"><button class="sm ghost" data-month="${g.month}">Show days</button></td></tr>
+        ${g.days.map(t => `<tr class="int-day" data-day-of="${g.month}" hidden><td>${fdate(t.date)}</td><td class="muted">Interest</td><td></td><td></td>
+          <td class="n">${fmt(t.amount)}</td><td class="muted">Calculated automatically</td><td></td></tr>`).join('')}`;
+    };
+    T.innerHTML = `<div class="card"><div class="table-wrap"><table>
+      <thead><tr><th>Date</th><th>Type</th><th>Holding</th><th class="n">Units</th><th class="n">Amount</th><th>Notes</th><th></th></tr></thead>
+      <tbody>${rowsOut.map(r => r.month ? monthRow(r) : txnRow(r)).join('') || '<tr><td colspan="7" class="muted">No transactions yet.</td></tr>'}</tbody></table></div></div>`;
+    $$('[data-month]', T).forEach(b => b.onclick = () => {
+      const open = b.textContent === 'Show days';
+      $$(`[data-day-of="${b.dataset.month}"]`, T).forEach(r => { r.hidden = !open; });
+      b.textContent = open ? 'Hide days' : 'Show days';
+    });
     $$('[data-edit]', T).forEach(b => b.onclick = () => txnForm(txns.find(t => t.id == b.dataset.edit)));
     $$('[data-del]', T).forEach(b => b.onclick = () => confirmDo('Delete this transaction?', () => guard(() => api(`transactions/${b.dataset.del}`, { method: 'DELETE' }), 'Deleted').then(route)));
   }
@@ -654,7 +680,7 @@ async function viewAccount(id) {
           <td class="actions"><button class="sm ghost" data-edit="${r.id}">Edit</button><button class="sm ghost danger" data-del="${r.id}">✕</button></td></tr>`).join('')
       || '<tr><td colspan="5" class="muted">No rates recorded. Add your interest rate (AER) and any platform fee.</td></tr>'}</tbody></table></div>
         <p class="note">${a.interest_mode === 'daily'
-          ? `Interest is credited automatically from ${fdate(a.interest_auto_from)}: every day, cash × ((1 + AER)^(1/365.25) − 1), rounded down to the penny and added to the balance so it compounds. Shown as one entry per month. Add a new row here whenever the rate changes.`
+          ? `Interest is credited automatically from ${fdate(a.interest_auto_from)}: every day, cash × ((1 + AER)^(1/365.25) − 1), rounded down to the penny and added to the balance the same day, so it compounds daily. On the Transactions tab the days are grouped by month. Add a new row here whenever the rate changes.`
           : 'Interest estimates use your daily cash balance × the rate in force on each day. Compare with the actual interest transactions you record to spot changes. To have interest credited automatically, edit the account and choose daily interest.'}</p>
       </div>
       <div class="card"><h2>Interest rate over time</h2><div class="chart-box sm">${a.rates.some(r => r.kind === 'interest') ? '<canvas id="c-rate"></canvas>' : '<div class="empty">No interest rates yet.</div>'}</div>

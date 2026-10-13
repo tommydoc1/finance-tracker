@@ -116,6 +116,7 @@ def _auto_invest(con, rec, skips):
 # ---------------------------------------------------------------- automatic daily interest
 
 AUTO_INT_PREFIX = "auto-interest:"
+DAILY_NOTE = "Daily interest (auto)"
 
 
 def generate_auto_interest(con, today=None):
@@ -123,8 +124,8 @@ def generate_auto_interest(con, today=None):
     compounding (each day's interest is added to the cash balance before the next day is calculated).
 
     Matches Trading 212's published method: daily payment = cash x ((1 + AER)^(1/365.25) - 1), rounded down to the
-    penny with the remainder carried to the next day. Days are grouped into one 'interest' transaction per month;
-    the current month's entry is updated on each run. Rate changes are taken from the account's rate history."""
+    penny with the remainder carried to the next day. One 'interest' transaction per day, so the balance grows
+    day by day; the UI groups them by month. Rate changes are taken from the account's rate history."""
     today = today or date.today()
     end = today - timedelta(days=1)  # interest for a day is paid once that day is over
     changed = 0
@@ -142,7 +143,7 @@ def generate_auto_interest(con, today=None):
             "SELECT * FROM transactions WHERE account_id=? AND (external_id IS NULL OR external_id NOT LIKE ?) ORDER BY date, id",
             (a["id"], AUTO_INT_PREFIX + "%")))
         cash, i, carry = 0.0, 0, 0.0
-        months = {}  # 'YYYY-MM' -> [amount, last_day, days]
+        daily = {}  # 'YYYY-MM-DD' -> amount credited that day
         x = start
         while i < len(txns) and calc.d(txns[i]["date"]) < start:
             cash += calc.cash_effect(txns[i]); i += 1
@@ -154,27 +155,21 @@ def generate_auto_interest(con, today=None):
             pay = int(carry * 100 + 1e-9) / 100  # round down to the penny, keep the rest for tomorrow
             carry -= pay
             cash += pay
-            m = months.setdefault(x.strftime("%Y-%m"), [0.0, x, 0])
-            m[0] += pay; m[1] = x; m[2] += 1
+            if pay > 0:
+                daily[x.isoformat()] = round(pay, 2)
             x += timedelta(days=1)
-        for key, (amt, last, days) in months.items():
-            ext = AUTO_INT_PREFIX + key
-            amt = round(amt, 2)
-            note = f"Daily interest, compounded ({days} day{'s' if days != 1 else ''}, auto)"
+        for day, amt in daily.items():
+            ext = AUTO_INT_PREFIX + day
             old = existing.pop(ext, None)
-            if amt <= 0:
-                if old:
-                    con.execute("DELETE FROM transactions WHERE id=?", (old["id"],)); changed += 1
-                continue
             if old:
-                if abs(old["amount"] - amt) > 0.004 or old["date"] != last.isoformat() or old["notes"] != note:
-                    con.execute("UPDATE transactions SET amount=?, date=?, notes=? WHERE id=?", (amt, last.isoformat(), note, old["id"]))
+                if abs(old["amount"] - amt) > 0.004 or old["date"] != day:
+                    con.execute("UPDATE transactions SET amount=?, date=?, notes=? WHERE id=?", (amt, day, DAILY_NOTE, old["id"]))
                     changed += 1
             else:
                 con.execute("INSERT INTO transactions(account_id,date,type,amount,notes,external_id) VALUES(?,?,'interest',?,?,?)",
-                            (a["id"], last.isoformat(), amt, note, ext))
+                            (a["id"], day, amt, DAILY_NOTE, ext))
                 changed += 1
-        for old in existing.values():  # months no longer in range (start date moved later)
+        for old in existing.values():  # days no longer in range (start moved later) and old monthly entries
             con.execute("DELETE FROM transactions WHERE id=?", (old["id"],)); changed += 1
     return changed
 
