@@ -166,17 +166,22 @@ async function loadRange(r, params) {   // params: query string without leading 
   return api(`series?${params}${start ? `&start=${start}` : ''}`);
 }
 const labelMode = (r, ser) => ser.intraday ? (r === '1D' ? 'time' : 'daytime') : (['1M', '6M', 'YTD'].includes(r) || (r === '5D' || r === '1D') ? 'day' : 'month');
-function rangeChange(points) {   // change over the period, not counting money paid in or taken out
+function rangeChange(points, holding = false) {   // change over the period, not counting money paid in or taken out
   if (points.length < 2) return '';
   const a = points[0], b = points[points.length - 1];
   const paid = b.contributed - a.contributed, gain = (b.value - a.value) - paid;
   const base = a.value + Math.max(paid, 0) / 2;
   const p = base > 0 ? gain / base * 100 : null;
   return `<span class="${cls(gain)}">${signed(gain)}${p != null ? ` (${p > 0 ? '+' : ''}${p.toFixed(2)}%)` : ''}</span>`
-    + (Math.abs(paid) >= 0.01 ? `<span class="muted"> · excl. ${fmt(Math.abs(paid))} ${paid > 0 ? 'paid in' : 'withdrawn'}</span>` : '');
+    + (Math.abs(paid) >= 0.01 ? `<span class="muted"> · excl. ${fmt(Math.abs(paid))} ${holding ? (paid > 0 ? 'net bought' : 'net sold / received') : (paid > 0 ? 'paid in' : 'withdrawn')}</span>` : '');
 }
+// holding picker: only ever for a single account
+const holdingSelect = (id, accountId) => {
+  const hs = HOLDINGS.filter(h => h.account_id === accountId);
+  return hs.length ? `<select class="chart-filter" id="${id}" aria-label="Show a single holding"><option value="">Whole account</option>${hs.map(h => `<option value="${h.id}">${esc(h.ticker)}${h.name ? ' – ' + esc(h.name.length > 34 ? h.name.slice(0, 33) + '…' : h.name) : ''}</option>`).join('')}</select>` : '';
+};
 
-function growthChart(canvas, points, { stacked = false, accounts = [], mode = 'month', zoom = false } = {}) {
+function growthChart(canvas, points, { stacked = false, accounts = [], mode = 'month', zoom = false, holding = false } = {}) {
   const [c1, c2] = palette();
   const labels = points.map(p => p.date);
   let datasets = stacked
@@ -184,7 +189,7 @@ function growthChart(canvas, points, { stacked = false, accounts = [], mode = 'm
       borderColor: palette()[i % 6], backgroundColor: palette()[i % 6] + '55', stack: 'v' }))
     : [
       { label: 'Value', data: points.map(p => p.value), borderColor: c1, backgroundColor: c1 + '22', fill: true, borderWidth: 2, pointRadius: 0, tension: .2 },
-      { label: 'Paid in', data: points.map(p => p.contributed), borderColor: c2, borderDash: [5, 4], borderWidth: 1.5, pointRadius: 0, stepped: true },
+      { label: holding ? 'Net invested' : 'Paid in', data: points.map(p => p.contributed), borderColor: c2, borderDash: [5, 4], borderWidth: 1.5, pointRadius: 0, stepped: true },
     ];
   // short ranges: leave out the paid-in line and scale to the value itself, so day-to-day moves are visible
   if (zoom && !stacked) { datasets = datasets.slice(0, 1); datasets[0].fill = 'start'; }
@@ -212,7 +217,7 @@ function growthChart(canvas, points, { stacked = false, accounts = [], mode = 'm
       },
     },
   });
-  c.$pts = points; c.$mode = mode;
+  c.$pts = points; c.$mode = mode; c.$holding = holding;
   attachRuler(c);
   return c;
 }
@@ -236,7 +241,7 @@ function rulerText(c, a, b) {
     `${signed(gain)}${pctv != null ? `  (${pctv > 0 ? '+' : ''}${pctv.toFixed(2)}%)` : ''}`,
     `${fmtPt(A.date)} → ${fmtPt(B.date)} · ${span}`,
   ];
-  if (Math.abs(paid) >= 0.01) lines.push(`excl. ${fmt(Math.abs(paid))} ${paid > 0 ? 'paid in' : 'withdrawn'}`);
+  if (Math.abs(paid) >= 0.01) lines.push(`excl. ${fmt(Math.abs(paid))} ${c.$holding ? (paid > 0 ? 'net bought' : 'net sold / received') : (paid > 0 ? 'paid in' : 'withdrawn')}`);
   return { lines, up: gain >= 0 };
 }
 
@@ -614,7 +619,7 @@ async function viewDashboard() {
     <div class="grid g3">
       <div class="card">
         <div class="card-head"><div><h2 style="margin:0">Growth</h2><div class="range-change" id="chg-growth"></div></div>
-          <div class="btns">${rangeButtons('ranges', growthRange())}<button class="sm" id="b-stack">By account</button></div>
+          <div class="btns"><select class="chart-filter" id="g-account" aria-label="Account"><option value="">All accounts</option>${live.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select><span id="g-holding-wrap"></span>${rangeButtons('ranges', growthRange())}<button class="sm" id="b-stack">By account</button></div>
         </div>
         <div class="chart-box"><canvas id="c-growth"></canvas></div>${rulerHint}
       </div>
@@ -662,15 +667,26 @@ async function viewDashboard() {
   if ($('#b-first')) $('#b-first').onclick = () => accountForm();
   $('#b-refresh').onclick = () => guard(() => api('prices/refresh', { method: 'POST' }), 'Prices refreshed').then(route);
 
-  let range = growthRange(), stacked = false, seq = 0;
+  await loadHoldings();
+  let range = growthRange(), stacked = false, seq = 0, acct = '', hold = '';
   const draw = async () => {
     const my = ++seq;
     $('#chg-growth').innerHTML = '<span class="muted">Loading…</span>';
-    const ser = await loadRange(range, `include_hidden=${incl}`);
-    if (my !== seq) return;   // a newer range was picked while this one loaded
+    const params = hold ? `holding_id=${hold}` : acct ? `account_id=${acct}` : `include_hidden=${incl}`;
+    const ser = await loadRange(range, params);
+    if (my !== seq) return;   // a newer choice was made while this one loaded
     charts.forEach(c => c.destroy()); charts = [];
-    $('#chg-growth').innerHTML = ser.points.length ? rangeChange(ser.points) + (['1D', '5D'].includes(range) && !ser.intraday ? '<span class="muted"> · daily values (no intraday prices)</span>' : '') : '';
-    if (ser.points.length) growthChart($('#c-growth'), ser.points, { stacked, accounts: ser.accounts, mode: labelMode(range, ser), zoom: ['1D', '5D', '1M'].includes(range) });
+    $('#chg-growth').innerHTML = ser.points.length ? rangeChange(ser.points, !!hold) + (['1D', '5D'].includes(range) && !ser.intraday ? '<span class="muted"> · daily values (no intraday prices)</span>' : '')
+      : '<span class="muted">No data for this selection yet.</span>';
+    if (ser.points.length) growthChart($('#c-growth'), ser.points, { stacked: stacked && !acct, accounts: ser.accounts, mode: labelMode(range, ser), zoom: ['1D', '5D', '1M'].includes(range), holding: !!hold });
+  };
+  $('#g-account').onchange = e => {
+    acct = e.target.value; hold = '';
+    // the holding filter only exists while a single account is selected
+    $('#g-holding-wrap').innerHTML = acct ? holdingSelect('g-holding', +acct) : '';
+    if ($('#g-holding')) $('#g-holding').onchange = ev => { hold = ev.target.value; draw(); };
+    $('#b-stack').hidden = !!acct;
+    draw();
   };
   $$('#ranges button').forEach(b => b.onclick = () => { range = b.dataset.r; growthRange(range); $$('#ranges button').forEach(x => x.classList.toggle('primary', x === b)); draw(); });
   $('#b-stack').onclick = e => { stacked = !stacked; e.target.classList.toggle('primary', stacked); draw(); };
@@ -743,7 +759,7 @@ async function viewAccount(id) {
   if (tab === 'overview') {
     T.innerHTML = `
       <div class="grid g3">
-        <div class="card"><div class="card-head"><div><h2 style="margin:0">Value vs paid in</h2><div class="range-change" id="chg-acc"></div></div>${ser.points.length ? rangeButtons('acc-ranges', growthRange()) : ''}</div>
+        <div class="card"><div class="card-head"><div><h2 style="margin:0" id="acc-chart-title">Value vs paid in</h2><div class="range-change" id="chg-acc"></div></div>${ser.points.length ? `<div class="btns">${holdingSelect('acc-holding', a.id)}${rangeButtons('acc-ranges', growthRange())}</div>` : ''}</div>
           <div class="chart-box">${ser.points.length ? '<canvas id="c-acc"></canvas>' : '<div class="empty">Add a transaction to see growth.</div>'}</div>${ser.points.length ? rulerHint : ''}</div>
         <div class="card"><h2>Summary</h2><table><tbody>
           <tr><td>Interest received (TY / all)</td><td class="n">${fmt(a.interest_ty)} / ${fmt(a.interest_total)}</td></tr>
@@ -755,16 +771,18 @@ async function viewAccount(id) {
         </tbody></table>${a.notes ? `<p class="note">${esc(a.notes)}</p>` : ''}</div>
       </div>`;
     if (ser.points.length) {
-      let r = growthRange(), seq = 0;
+      let r = growthRange(), seq = 0, hold = '';
       const drawAcc = async () => {
         const my = ++seq;
         $('#chg-acc').innerHTML = '<span class="muted">Loading…</span>';
-        const s2 = await loadRange(r, `account_id=${id}`);
+        const s2 = await loadRange(r, hold ? `holding_id=${hold}` : `account_id=${id}`);
         if (my !== seq) return;
         charts.forEach(c => c.destroy()); charts = [];
-        $('#chg-acc').innerHTML = s2.points.length ? rangeChange(s2.points) : '';
-        if (s2.points.length) growthChart($('#c-acc'), s2.points, { mode: labelMode(r, s2), zoom: ['1D', '5D', '1M'].includes(r) });
+        $('#acc-chart-title').textContent = hold ? 'Value vs net invested' : 'Value vs paid in';
+        $('#chg-acc').innerHTML = s2.points.length ? rangeChange(s2.points, !!hold) : '<span class="muted">No data for this holding yet.</span>';
+        if (s2.points.length) growthChart($('#c-acc'), s2.points, { mode: labelMode(r, s2), zoom: ['1D', '5D', '1M'].includes(r), holding: !!hold });
       };
+      if ($('#acc-holding')) $('#acc-holding').onchange = e => { hold = e.target.value; drawAcc(); };
       $$('#acc-ranges button').forEach(b => b.onclick = () => { r = b.dataset.r; growthRange(r); $$('#acc-ranges button').forEach(x => x.classList.toggle('primary', x === b)); drawAcc(); });
       drawAcc();
     }

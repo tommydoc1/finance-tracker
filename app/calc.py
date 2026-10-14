@@ -289,6 +289,34 @@ class AccountState:
         return out
 
 
+def holding_series(state, hid, dates):
+    """One holding over time: (market value, net invested, units) at the end of each date.
+    Net invested = buys - sells - dividends received, so value - net invested is the holding's total return.
+    Reinvested dividends cancel out (the dividend is received, then spent on a buy)."""
+    txns = [t for t in state.txns if t.get("holding_id") == hid]
+    tdates = [d(t["date"]) for t in txns]
+    units = invested = 0.0
+    last_px, i, out = None, 0, []
+    for x in dates:
+        while i < len(txns) and tdates[i] <= x:
+            t = txns[i]; u = t.get("units") or 0
+            if t["type"] == "buy":
+                units += u; invested += t["amount"]
+                if u: last_px = t["amount"] / u
+            elif t["type"] == "sell":
+                units -= u; invested -= t["amount"]
+                if u: last_px = t["amount"] / u
+            elif t["type"] == "unit_adjust":
+                units += u
+            elif t["type"] == "dividend":
+                invested -= t["amount"]
+            i += 1
+        p = state.prices.on(hid, x)
+        px = p if p is not None else (last_px or 0.0)
+        out.append((units * px if abs(units) > 1e-9 else 0.0, invested, units))
+    return out
+
+
 def sample_dates(start, end, max_points=400):
     days = (end - start).days
     step = max(1, days // max_points)

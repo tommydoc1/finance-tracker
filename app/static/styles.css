@@ -199,3 +199,5 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft
 .ranges button { flex: 0 0 auto; }
 .card-head > .btns, .card-head > div { min-width: 0; max-width: 100%; }
 .ranges { min-width: 0; }
+.chart-filter { width: auto; max-width: 220px; padding: 4px 8px; font-size: 0.75rem; border-radius: 8px; }
+@media (max-width: 900px) { .chart-filter { max-width: 100%; } }

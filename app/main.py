@@ -509,11 +509,15 @@ def account_detail(aid: int):
 
 
 @app.get("/api/series")
-def series(account_id: int | None = None, start: str | None = None, include_hidden: bool = False):
-    """Value vs net contributions over time (whole portfolio or one account)."""
+def series(account_id: int | None = None, start: str | None = None, include_hidden: bool = False,
+           holding_id: int | None = None):
+    """Value vs net contributions over time: whole portfolio, one account, or one holding
+    (holding: market value vs net invested)."""
     today = date.today()
     with db() as con:
-        accounts, states, T, *_ = _load(con)
+        accounts, states, T, H, *_ = _load(con)
+    if holding_id:
+        return _holding_series(accounts, states, T, H, holding_id, start, today)
     ids = [account_id] if account_id else [a["id"] for a in accounts if not a["archived"] and (include_hidden or not a["hidden"])]
     firsts = [calc.d(T[i][0]["date"]) for i in ids if T.get(i)]
     firsts += [calc.d(v["date"]) for i in ids for v in states[i].vals[:1]]
@@ -534,14 +538,53 @@ def series(account_id: int | None = None, start: str | None = None, include_hidd
     return {"points": pts, "accounts": [{"id": a["id"], "name": a["name"]} for a in accounts if a["id"] in ids]}
 
 
+def _find_holding(accounts, H, holding_id):
+    for a in accounts:
+        for h in H[a["id"]]:
+            if h["id"] == holding_id:
+                return a, h
+    raise HTTPException(404, "holding not found")
+
+
+def _holding_series(accounts, states, T, H, holding_id, start, today):
+    a, h = _find_holding(accounts, H, holding_id)
+    st = states[a["id"]]
+    firsts = [calc.d(t["date"]) for t in T[a["id"]] if t.get("holding_id") == holding_id]
+    if not firsts:
+        return {"points": [], "accounts": [], "holding": h}
+    s = max(min(firsts), calc.d(start)) if start else min(firsts)
+    dates = calc.sample_dates(s, today)
+    pts = [{"date": x.isoformat(), "value": round(v, 2), "contributed": round(inv, 2), "by_account": {a["id"]: round(v, 2)}}
+           for x, (v, inv, _) in zip(dates, calc.holding_series(st, holding_id, dates))]
+    return {"points": pts, "accounts": [{"id": a["id"], "name": a["name"]}], "holding": h}
+
+
 @app.get("/api/series/intraday")
-def series_intraday(range: str = "1d", account_id: int | None = None, include_hidden: bool = False):
+def series_intraday(range: str = "1d", account_id: int | None = None, include_hidden: bool = False,
+                    holding_id: int | None = None):
     """1D / 5D chart: value through the trading day(s) using live intraday prices for ETFs and shares.
     Cash, units and paid-in come from the ledger for each day; holdings without intraday data (FT pension funds,
     manual prices) use their daily price; statement-valued accounts use their daily value."""
     rng = "5d" if range == "5d" else "1d"
     with db() as con:
         accounts, states, T, H, *_ = _load(con)
+    if holding_id:
+        a, h = _find_holding(accounts, H, holding_id)
+        bars = services.fetch_intraday(h.get("price_symbol"), rng)
+        if not bars:
+            out = series(start=(date.today() - timedelta(days=1 if rng == "1d" else 5)).isoformat(), holding_id=holding_id)
+            out["intraday"] = False
+            return out
+        cache, pts = {}, []
+        for ts, px in bars:
+            day = datetime.fromtimestamp(ts, timezone.utc).date()
+            if day not in cache:
+                cache[day] = calc.holding_series(states[a["id"]], holding_id, [day])[0]
+            _, inv, units = cache[day]
+            v = units * px if abs(units) > 1e-9 else 0.0
+            pts.append({"date": datetime.fromtimestamp(ts, timezone.utc).isoformat(), "value": round(v, 2),
+                        "contributed": round(inv, 2), "by_account": {a["id"]: round(v, 2)}})
+        return {"points": pts, "accounts": [{"id": a["id"], "name": a["name"]}], "holding": h, "intraday": True}
     ids = [account_id] if account_id else [a["id"] for a in accounts if not a["archived"] and (include_hidden or not a["hidden"])]
     bars = {}  # holding id -> [(ts, price)]
     for i in ids:
