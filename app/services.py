@@ -437,13 +437,38 @@ def fetch_prices(con, holding, rng="5d"):
 
 # ---------------------------------------------------------------- intraday prices (for the 1D / 5D chart)
 
-_INTRADAY_CACHE = {}  # (symbol, range) -> (fetched_at, [(epoch_seconds, gbp_price)])
+_INTRADAY_CACHE = {}  # (symbol, range) -> (fetched_at, [(epoch_seconds, gbp_price)], previous close in GBP or None)
 INTRADAY_TTL = 300    # seconds
+
+
+def _intraday_fx(client, currency, rng, interval):
+    """Exchange-rate bars for converting intraday prices at the rate *at that moment*, not a daily rate.
+    Returns a function ts -> rate. Pence and pounds need no lookup."""
+    if currency in ("GBp", "GBX"):
+        return lambda ts: 0.01
+    if currency == "GBP":
+        return lambda ts: 1.0
+    try:
+        r = client.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{currency.upper()}GBP=X",
+                       params={"range": rng, "interval": interval}, headers=UA)
+        r.raise_for_status()
+        res = r.json()["chart"]["result"][0]
+        pts = [(t, c) for t, c in zip(res.get("timestamp") or [], (res.get("indicators", {}).get("quote") or [{}])[0].get("close") or []) if c]
+        if pts:
+            import bisect
+            ts_list, rates = [p[0] for p in pts], [p[1] for p in pts]
+            return lambda ts: rates[max(0, bisect.bisect_right(ts_list, ts) - 1)]
+    except Exception as e:
+        log.warning("intraday FX fetch failed for %s: %s", currency, e)
+    daily = FxSeries(client, currency, "1mo")   # fallback: one rate per day
+    return lambda ts: daily.on(datetime.utcfromtimestamp(ts).date().isoformat())
 
 
 def fetch_intraday(symbol, rng="1d"):
     """Intraday GBP prices from Yahoo for a ticker: 5-minute bars for '1d', 15-minute for '5d'.
-    Cached for 5 minutes. Returns [] for ISIN/FT funds (priced once a day) or if Yahoo can't be reached."""
+    Each bar is placed at its *end* time with its closing price, plus the opening price at the start of
+    each session, so 08:00 really is the 08:00 price. Foreign-currency lines are converted at the exchange
+    rate at that moment. Cached for 5 minutes. Returns [] for ISIN/FT funds or if Yahoo can't be reached."""
     sym = (symbol or "").strip()
     if not sym or is_ft_symbol(sym):
         return []
@@ -452,21 +477,63 @@ def fetch_intraday(symbol, rng="1d"):
     if hit and time.time() - hit[0] < INTRADAY_TTL:
         return hit[1]
     interval = "5m" if rng == "1d" else "15m"
+    prev = None
     try:
         with httpx.Client(timeout=15, follow_redirects=True) as client:
             r = client.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
                            params={"range": rng, "interval": interval, "includePrePost": "false"}, headers=UA)
             r.raise_for_status()
             res = r.json()["chart"]["result"][0]
-            fx = FxSeries(client, res["meta"].get("currency", "GBP"), "1mo")
+            cur = res["meta"].get("currency", "GBP")
+            fx = _intraday_fx(client, cur, rng, interval)
+            pc = res["meta"].get("chartPreviousClose")
+            if pc and ts_first(res):
+                prev = pc * _prev_fx(client, cur, fx, ts_first(res))
+            step = 300 if interval == "5m" else 900
             ts = res.get("timestamp") or []
-            closes = (res.get("indicators", {}).get("quote") or [{}])[0].get("close") or []
-            bars = [(t, c * fx.on(datetime.utcfromtimestamp(t).date().isoformat())) for t, c in zip(ts, closes) if c is not None]
+            q = (res.get("indicators", {}).get("quote") or [{}])[0]
+            opens, closes = q.get("open") or [None] * len(ts), q.get("close") or []
+            bars, last_day = [], None
+            for t, o, c in zip(ts, opens, closes):
+                if c is None:
+                    continue
+                day = datetime.utcfromtimestamp(t).date()
+                if day != last_day and o is not None:   # session open: the price at the very start
+                    bars.append((t, o * fx(t)))
+                last_day = day
+                bars.append((t + step, c * fx(t + step)))
     except Exception as e:
         log.warning("intraday fetch failed for %s: %s", sym, e)
-        bars = hit[1] if hit else []
-    _INTRADAY_CACHE[key] = (time.time(), bars)
+        bars, prev = (hit[1], hit[2]) if hit else ([], None)
+    _INTRADAY_CACHE[key] = (time.time(), bars, prev)
     return bars
+
+
+def ts_first(res):
+    ts = res.get("timestamp") or []
+    return ts[0] if ts else None
+
+
+def _prev_fx(client, currency, fx, first_ts):
+    """Exchange rate for the previous close: the FX market's own previous close, else the first rate of the day."""
+    if currency in ("GBp", "GBX", "GBP"):
+        return fx(first_ts)
+    try:
+        r = client.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{currency.upper()}GBP=X",
+                       params={"range": "1d", "interval": "5m"}, headers=UA)
+        r.raise_for_status()
+        p = r.json()["chart"]["result"][0]["meta"].get("chartPreviousClose")
+        if p:
+            return float(p)
+    except Exception:
+        pass
+    return fx(first_ts)
+
+
+def intraday_prev_close(symbol, rng="1d"):
+    """Previous session's closing price in GBP for a ticker fetched with fetch_intraday (None if unknown)."""
+    hit = _INTRADAY_CACHE.get(((symbol or "").strip(), rng))
+    return hit[2] if hit else None
 
 
 def refresh_all_prices(con, rng="1mo"):  # a month back each run: catches any missed days and dividends

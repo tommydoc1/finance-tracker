@@ -166,6 +166,12 @@ async function loadRange(r, params) {   // params: query string without leading 
   return api(`series?${params}${start ? `&start=${start}` : ''}`);
 }
 const labelMode = (r, ser) => ser.intraday ? (r === '1D' ? 'time' : 'daytime') : (['1M', '6M', 'YTD'].includes(r) || (r === '5D' || r === '1D') ? 'day' : 'month');
+function prevCloseChange(ser) {   // 1D only: how brokers quote "today" – latest value vs the previous close
+  const b = ser.points[ser.points.length - 1], a = ser.prev;
+  if (!a || !(a.value > 0)) return '';
+  const g = (b.value - a.value) - (b.contributed - a.contributed), p = g / a.value * 100;
+  return `<span class="muted"> · </span><span class="${cls(g)}" title="Compared with the closing value before today's chart starts">${signed(g)} (${p > 0 ? '+' : ''}${p.toFixed(2)}%) vs previous close</span>`;
+}
 function rangeChange(points, holding = false) {   // change over the period, not counting money paid in or taken out
   if (points.length < 2) return '';
   const a = points[0], b = points[points.length - 1];
@@ -676,7 +682,7 @@ async function viewDashboard() {
     const ser = await loadRange(range, params);
     if (my !== seq) return;   // a newer choice was made while this one loaded
     charts.forEach(c => c.destroy()); charts = [];
-    $('#chg-growth').innerHTML = ser.points.length ? rangeChange(ser.points, !!hold) + (['1D', '5D'].includes(range) && !ser.intraday ? '<span class="muted"> · daily values (no intraday prices)</span>' : '')
+    $('#chg-growth').innerHTML = ser.points.length ? rangeChange(ser.points, !!hold) + (range === '1D' && ser.intraday ? prevCloseChange(ser) : '') + (['1D', '5D'].includes(range) && !ser.intraday ? '<span class="muted"> · daily values (no intraday prices)</span>' : '')
       : '<span class="muted">No data for this selection yet.</span>';
     if (ser.points.length) growthChart($('#c-growth'), ser.points, { stacked: stacked && !acct, accounts: ser.accounts, mode: labelMode(range, ser), zoom: ['1D', '5D', '1M'].includes(range), holding: !!hold });
   };
@@ -779,7 +785,7 @@ async function viewAccount(id) {
         if (my !== seq) return;
         charts.forEach(c => c.destroy()); charts = [];
         $('#acc-chart-title').textContent = hold ? 'Value vs net invested' : 'Value vs paid in';
-        $('#chg-acc').innerHTML = s2.points.length ? rangeChange(s2.points, !!hold) : '<span class="muted">No data for this holding yet.</span>';
+        $('#chg-acc').innerHTML = s2.points.length ? rangeChange(s2.points, !!hold) + (r === '1D' && s2.intraday ? prevCloseChange(s2) : '') : '<span class="muted">No data for this holding yet.</span>';
         if (s2.points.length) growthChart($('#c-acc'), s2.points, { mode: labelMode(r, s2), zoom: ['1D', '5D', '1M'].includes(r), holding: !!hold });
       };
       if ($('#acc-holding')) $('#acc-holding').onchange = e => { hold = e.target.value; drawAcc(); };

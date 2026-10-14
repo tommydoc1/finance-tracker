@@ -584,7 +584,13 @@ def series_intraday(range: str = "1d", account_id: int | None = None, include_hi
             v = units * px if abs(units) > 1e-9 else 0.0
             pts.append({"date": datetime.fromtimestamp(ts, timezone.utc).isoformat(), "value": round(v, 2),
                         "contributed": round(inv, 2), "by_account": {a["id"]: round(v, 2)}})
-        return {"points": pts, "accounts": [{"id": a["id"], "name": a["name"]}], "holding": h, "intraday": True}
+        prev_day = datetime.fromtimestamp(bars[0][0], timezone.utc).date() - timedelta(days=1)
+        pv, pinv, punits = calc.holding_series(states[a["id"]], holding_id, [prev_day])[0]
+        pclose = services.intraday_prev_close(h.get("price_symbol"), rng)
+        if pclose:
+            pv = punits * pclose
+        return {"points": pts, "accounts": [{"id": a["id"], "name": a["name"]}], "holding": h, "intraday": True,
+                "prev": {"date": prev_day.isoformat(), "value": round(pv, 2), "contributed": round(pinv, 2)}}
     ids = [account_id] if account_id else [a["id"] for a in accounts if not a["archived"] and (include_hidden or not a["hidden"])]
     bars = {}  # holding id -> [(ts, price)]
     for i in ids:
@@ -624,7 +630,20 @@ def series_intraday(range: str = "1d", account_id: int | None = None, include_hi
             row["by_account"][i] = round(v, 2)
         row["value"] = round(row["value"], 2); row["contributed"] = round(row["contributed"], 2)
         pts.append(row)
-    return {"points": pts, "accounts": [{"id": a["id"], "name": a["name"]} for a in accounts if a["id"] in ids], "intraday": True}
+    prev_day = datetime.fromtimestamp(stamps[0], timezone.utc).date() - timedelta(days=1)   # last close before the chart
+    prev = []
+    for i in ids:
+        sn = states[i].snapshot(prev_day)
+        if states[i].a["valuation_mode"] == "manual":
+            prev.append((sn["value"], sn["contributed"])); continue
+        v = sn["cash"]
+        for hid, info in sn["holdings"].items():
+            h = next((x for x in H[i] if x["id"] == hid), {})
+            pc = services.intraday_prev_close(h.get("price_symbol"), rng) if hid in bars else None
+            v += info["units"] * (pc if pc else info["price"])
+        prev.append((v, sn["contributed"]))
+    return {"points": pts, "accounts": [{"id": a["id"], "name": a["name"]} for a in accounts if a["id"] in ids], "intraday": True,
+            "prev": {"date": prev_day.isoformat(), "value": round(sum(v for v, _ in prev), 2), "contributed": round(sum(c for _, c in prev), 2)}}
 
 
 @app.get("/api/income")
