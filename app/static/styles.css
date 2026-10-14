@@ -201,3 +201,8 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft
 .ranges { min-width: 0; }
 .chart-filter { width: auto; max-width: 220px; padding: 4px 8px; font-size: 0.75rem; border-radius: 8px; }
 @media (max-width: 900px) { .chart-filter { max-width: 100%; } }
+
+.signout { margin-top: auto; color: var(--muted); text-decoration: none; padding: 8px 10px; border-radius: 8px; font-weight: 500; }
+.signout:hover { background: var(--panel-2); color: var(--ink); }
+.signout + .sidebar-foot { margin-top: 0; }
+@media (max-width: 900px) { .signout { margin-top: 0; margin-left: auto; white-space: nowrap; } }

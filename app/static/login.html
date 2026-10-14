@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Sign in – Finance</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%231f6f5c'/><path d='M7 22l6-7 5 4 7-9' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+  <script>
+    // same theme / accent / text size as the app (saved in this browser)
+    try {
+      var u = JSON.parse(localStorage.getItem('ui') || '{}'), r = document.documentElement;
+      r.dataset.theme = u.theme || 'auto';
+      if (u.accent) r.style.setProperty('--accent', u.accent);
+      var sz = { small: .92, normal: 1, large: 1.12, xlarge: 1.25 }[u.size];
+      if (sz) r.style.setProperty('--text-scale', sz);
+    } catch (e) {}
+  </script>
+  <link rel="stylesheet" href="/static/styles.css">
+  <style>
+    body.login { display: grid; place-items: center; grid-template-columns: 1fr; min-height: 100vh; padding: 16px; }
+    .login-card { width: min(380px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 28px 24px 24px; box-shadow: var(--shadow); }
+    .login-brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.25rem; margin-bottom: 4px; }
+    .login-brand .mark { width: 28px; height: 28px; border-radius: 8px; background: var(--accent); display: grid; place-items: center; }
+    .login-card .sub { margin: 0 0 20px; }
+    .login-card form { display: grid; gap: 14px; }
+    .login-card input { padding: 11px 12px; font-size: 1rem; }
+    .login-card button[type=submit] { padding: 11px; font-size: 1rem; margin-top: 4px; }
+    .login-msg { font-size: 0.8125rem; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); }
+    .login-msg.err { border-color: var(--down); color: var(--down); }
+    .login-msg:empty { display: none; }
+    .pw-wrap { position: relative; }
+    .pw-wrap input { padding-right: 64px; }
+    .pw-toggle { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: 0; background: none; color: var(--muted); font-size: 0.75rem; padding: 6px 8px; }
+  </style>
+</head>
+<body class="login">
+  <main class="login-card">
+    <div class="login-brand"><span class="mark"><svg viewBox="0 0 32 32" width="18" height="18" aria-hidden="true"><path d="M7 22l6-7 5 4 7-9" stroke="var(--on-accent)" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Finance</div>
+    <p class="sub muted">Sign in to continue</p>
+    <form id="f" autocomplete="on" novalidate>
+      <div class="login-msg" id="msg" role="status"></div>
+      <label>Username<input id="u" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus></label>
+      <label>Password
+        <span class="pw-wrap"><input id="p" name="password" type="password" autocomplete="current-password" required>
+          <button type="button" class="pw-toggle" id="show" aria-label="Show password">Show</button></span>
+      </label>
+      <button type="submit" class="primary" id="go">Sign in</button>
+    </form>
+    <p class="note" style="margin:16px 0 0">You'll be signed out after {{MINUTES}} minutes without activity.</p>
+  </main>
+  <script>
+    var q = new URLSearchParams(location.search), msg = document.getElementById('msg');
+    if (q.get('expired')) msg.textContent = 'You were signed out after {{MINUTES}} minutes without activity.';
+    else if (q.get('out')) msg.textContent = "You've been signed out.";
+    document.getElementById('show').onclick = function () {
+      var p = document.getElementById('p'), show = p.type === 'password';
+      p.type = show ? 'text' : 'password'; this.textContent = show ? 'Hide' : 'Show';
+      this.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+    };
+    document.getElementById('f').onsubmit = async function (e) {
+      e.preventDefault();
+      var u = document.getElementById('u').value.trim(), p = document.getElementById('p').value, go = document.getElementById('go');
+      if (!u || !p) { msg.className = 'login-msg err'; msg.textContent = 'Enter your username and password.'; return; }
+      go.disabled = true; go.textContent = 'Signing in…';
+      try {
+        var r = await fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: u, password: p }), credentials: 'same-origin' });
+        if (r.ok) {
+          var next = sessionStorage.getItem('next') || location.hash || ''; sessionStorage.removeItem('next');
+          location.replace('/' + (next.startsWith('#/') ? next : ''));
+          return;
+        }
+        var d = {}; try { d = await r.json(); } catch (x) {}
+        msg.className = 'login-msg err'; msg.textContent = d.detail || 'Sign-in failed.';
+        document.getElementById('p').select();
+      } catch (x) {
+        msg.className = 'login-msg err'; msg.textContent = "Can't reach the server – check your connection.";
+      }
+      go.disabled = false; go.textContent = 'Sign in';
+    };
+  </script>
+</body>
+</html>

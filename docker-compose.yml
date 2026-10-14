@@ -20,6 +20,7 @@ services:
       TZ: Europe/London
       AUTO_PRICES: "true"        # daily ETF/fund prices from Yahoo Finance for holdings with a price symbol
       REFRESH_HOURS: "6"         # how often prices refresh and recurring payments are generated
+      SESSION_MINUTES: "60"      # sign out after this many minutes without activity
     volumes:
       - /srv/finance-tracker/data:/data   # SQLite database lives here – back this folder up
     labels:

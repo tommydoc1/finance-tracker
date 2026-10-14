@@ -1,6 +1,9 @@
 """Finance Tracker – FastAPI app serving the API and the single-page frontend."""
+import asyncio
 import base64
 import csv
+import hashlib
+import hmac
 import io
 import json
 import logging
@@ -13,7 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import calc, services
@@ -40,35 +43,162 @@ STATIC = Path(__file__).parent / "static"
 app = FastAPI(title="Finance Tracker", docs_url="/api/docs", openapi_url="/api/openapi.json")
 
 
-# ---------------------------------------------------------------- auth (HTTP Basic, optional)
+# ---------------------------------------------------------------- auth: sign-in page + session cookie
+# Signed in = a signed, expiring cookie. Each request while signed in pushes the expiry back, so the session
+# ends after SESSION_MINUTES without activity. The page also tracks activity and returns to /login when idle.
+
+SESSION_MINUTES = float(os.environ.get("SESSION_MINUTES", "60"))
+COOKIE = "ft_session"
+PUBLIC_PATHS = {"/login", "/logout", "/api/login", "/api/logout", "/api/health", "/favicon.ico"}
+_secret = None
+_fails = defaultdict(list)   # ip -> recent failed sign-in times
+
+
+def _session_key():
+    global _secret
+    if _secret is None:
+        s = os.environ.get("SESSION_SECRET", "")
+        if not s:
+            with db() as con:   # generated once, kept in the database so restarts don't sign you out
+                s = get_setting(con, "session_secret")
+                if not s:
+                    s = secrets.token_hex(32)
+                    set_setting(con, "session_secret", s)
+        _secret = s
+    # username/password are part of the key: changing either signs every device out
+    return hashlib.sha256(f"{_secret}|{USER}|{PASSWORD}".encode()).digest()
+
+
+def _sign(msg):
+    return hmac.new(_session_key(), msg.encode(), hashlib.sha256).hexdigest()
+
+
+def _make_token():
+    exp = str(int(time.time() + SESSION_MINUTES * 60))
+    return f"{exp}.{_sign(exp)}"
+
+
+def _token_ok(tok):
+    try:
+        exp, sig = (tok or "").split(".", 1)
+        return hmac.compare_digest(sig, _sign(exp)) and int(exp) > time.time()
+    except ValueError:
+        return False
+
+
+def _is_https(request):
+    return request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https"
+
+
+def _set_session(resp, request):
+    resp.set_cookie(COOKIE, _make_token(), max_age=int(SESSION_MINUTES * 60), httponly=True, samesite="lax",
+                    secure=_is_https(request), path="/")
+
+
+def _client_ip(request):
+    return request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "?")
+
+
+def _creds_ok(u, p, ip):
+    # compare as bytes: compare_digest raises on non-ASCII str (e.g. a £ in the password)
+    user_ok = secrets.compare_digest((u or "").encode(), USER.encode())
+    pass_ok = secrets.compare_digest((p or "").encode(), PASSWORD.encode())
+    if not (user_ok and pass_ok):  # explain the failure in the container log, never the password itself
+        log.warning("sign-in failed from %s: %s", ip, "wrong username (got %r, expected %r)" % (u, USER) if not user_ok
+                    else "wrong password (got %d characters, expected %d)" % (len(p or ""), len(PASSWORD)))
+    return user_ok and pass_ok
+
+
+def _basic_ok(request):
+    """Scripts and tools may still send HTTP Basic credentials. The browser pop-up is never triggered."""
+    hdr = request.headers.get("authorization", "")
+    if not hdr.startswith("Basic "):
+        return False
+    try:
+        raw = base64.b64decode(hdr[6:].strip())
+        try:
+            creds = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            creds = raw.decode("latin-1")
+        u, _, p = creds.partition(":")
+        return _creds_ok(u, p, _client_ip(request))
+    except Exception:
+        return False
+
 
 @app.middleware("http")
-async def basic_auth(request: Request, call_next):
-    if PASSWORD and request.url.path != "/api/health":
-        ok = False
-        hdr = request.headers.get("authorization", "")
-        if hdr.startswith("Basic "):
-            try:
-                raw = base64.b64decode(hdr[6:].strip())
-                try:
-                    creds = raw.decode("utf-8")
-                except UnicodeDecodeError:
-                    creds = raw.decode("latin-1")
-                u, _, p = creds.partition(":")
-                # compare as bytes: compare_digest raises on non-ASCII str (e.g. a £ in the password)
-                user_ok = secrets.compare_digest(u.encode(), USER.encode())
-                pass_ok = secrets.compare_digest(p.encode(), PASSWORD.encode())
-                ok = user_ok and pass_ok
-                if not ok:  # explain the failure in the container log, never the password itself
-                    log.warning("login failed from %s: %s", request.client.host if request.client else "?",
-                                "wrong username (got %r, expected %r)" % (u, USER) if not user_ok
-                                else "wrong password (got %d characters, expected %d)" % (len(p), len(PASSWORD)))
-            except Exception as e:
-                log.warning("login failed: unreadable credentials (%s)", e)
-                ok = False
-        if not ok:
-            return Response("Authentication required", 401, {"WWW-Authenticate": 'Basic realm="Finance Tracker"'})
-    return await call_next(request)
+async def session_auth(request: Request, call_next):
+    if not PASSWORD:
+        return await call_next(request)
+    path = request.url.path
+    if path in PUBLIC_PATHS or path.startswith("/static/"):
+        return await call_next(request)
+    if _token_ok(request.cookies.get(COOKIE)):
+        resp = await call_next(request)
+        if path != "/api/session/check":
+            _set_session(resp, request)   # activity: push the expiry back another SESSION_MINUTES
+        return resp
+    if _basic_ok(request):
+        return await call_next(request)
+    if path.startswith("/api/"):
+        return JSONResponse({"detail": "Signed out"}, 401)
+    return RedirectResponse("/login", 303)
+
+
+@app.post("/api/login")
+async def login(request: Request, body: dict = Body(...)):
+    ip, now = _client_ip(request), time.time()
+    _fails[ip] = [t for t in _fails[ip] if t > now - 300]
+    if len(_fails[ip]) >= 5:
+        raise HTTPException(429, "Too many attempts – wait a few minutes and try again")
+    if not _creds_ok(_env_clean(body.get("username")), body.get("password") or "", ip):
+        _fails[ip].append(now)
+        await asyncio.sleep(0.6)   # slows down guessing
+        raise HTTPException(401, "Wrong username or password")
+    _fails.pop(ip, None)
+    resp = JSONResponse({"ok": True})
+    _set_session(resp, request)
+    return resp
+
+
+@app.post("/api/logout")
+def logout(request: Request):
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(COOKIE, path="/")
+    return resp
+
+
+@app.get("/logout")
+def logout_page():
+    resp = RedirectResponse("/login?out=1", 303)
+    resp.delete_cookie(COOKIE, path="/")
+    return resp
+
+
+@app.get("/api/session")
+def session_info():
+    """Called by the page while you're active: keeps the session alive and tells it the timeout."""
+    return {"auth": bool(PASSWORD), "user": USER if PASSWORD else None, "minutes": SESSION_MINUTES}
+
+
+@app.get("/api/session/check")
+def session_check():
+    """Is the session still valid? (Doesn't extend it.)"""
+    return {"ok": True}
+
+
+@app.get("/login")
+def login_page(request: Request):
+    if not PASSWORD or _token_ok(request.cookies.get(COOKIE)):
+        return RedirectResponse("/", 303)
+    html = (STATIC / "login.html").read_text().replace("/static/styles.css\"", f"/static/styles.css?v={APP_VERSION[:12]}\"")
+    return HTMLResponse(html.replace("{{MINUTES}}", f"{SESSION_MINUTES:g}"),
+                        headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+
+def _env_clean(v):
+    v = (v or "").strip()
+    return v
 
 
 # ---------------------------------------------------------------- background jobs

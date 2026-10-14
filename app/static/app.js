@@ -35,6 +35,42 @@ const RULES = {
 };
 const RATE_KINDS = { interest: 'Interest rate (AER %)', fee_pct: 'Platform fee (% per year)', fee_flat: 'Flat fee (£ per month)' };
 
+// ------------------------------------------------------------ session: sign out after inactivity
+let SESSION = { auth: false, minutes: 60 }, lastActivity = Date.now(), lastServerTouch = Date.now(), leaving = false, warned = false;
+function toLogin(expired) {
+  if (leaving) return;
+  leaving = true;
+  try { if (location.hash && location.hash !== '#/') sessionStorage.setItem('next', location.hash); } catch { /* ignore */ }
+  location.replace(expired ? '/login?expired=1' : '/login?out=1');
+}
+async function signOut() {
+  try { await fetch('/api/logout', { method: 'POST' }); } catch { /* still go to the sign-in page */ }
+  toLogin(false);
+}
+function onActivity() {
+  lastActivity = Date.now(); warned = false;
+  // reading/scrolling makes no requests, so tell the server you're still here (at most every 5 minutes)
+  if (SESSION.auth && Date.now() - lastServerTouch > 5 * 60e3) { lastServerTouch = Date.now(); api('session').catch(() => {}); }
+}
+function checkIdle() {
+  if (!SESSION.auth || leaving) return;
+  const idle = Date.now() - lastActivity, limit = SESSION.minutes * 60e3;
+  if (idle >= limit) { fetch('/api/logout', { method: 'POST' }).finally(() => toLogin(true)); return; }
+  if (!warned && limit - idle <= 60e3) { warned = true; toast('Signing out in 1 minute for inactivity – move or tap to stay signed in'); }
+}
+function startSession() {
+  api('session').then(s => {
+    SESSION = s;
+    if (!s.auth) return;
+    ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart', 'scroll'].forEach(ev => addEventListener(ev, onActivity, { passive: true, capture: true }));
+    setInterval(checkIdle, 15e3);
+    // a phone or laptop that slept for over an hour: check straight away when the tab comes back
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) { checkIdle(); fetch('/api/session/check').then(r => { if (r.status === 401) toLogin(true); }); } });
+    const foot = $('#signout');
+    if (foot) { foot.hidden = false; foot.onclick = e => { e.preventDefault(); signOut(); }; }
+  }).catch(() => {});
+}
+
 async function api(path, opts = {}) {
   const isForm = opts.body instanceof FormData;
   const r = await fetch('/api/' + path, {
@@ -42,6 +78,8 @@ async function api(path, opts = {}) {
     headers: opts.body && !isForm ? { 'content-type': 'application/json' } : {},
     body: opts.body && !isForm ? JSON.stringify(opts.body) : opts.body,
   });
+  if (r.status === 401) { toLogin(true); throw new Error('Signed out'); }
+  if (r.ok) lastServerTouch = Date.now();
   if (!r.ok) {
     let m = await r.text();
     try { m = JSON.parse(m).detail; } catch { /* plain text */ }
@@ -1139,4 +1177,5 @@ api('settings/ui').then(p => {
   applyUI(p);
   if (changed) route();
 }).catch(() => { /* keep cached appearance */ });
+startSession();
 route();
