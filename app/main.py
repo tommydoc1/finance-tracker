@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import calc, services
@@ -697,6 +697,29 @@ def health():
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
+_INDEX_HTML = None
+
+
 @app.get("/{path:path}")
 def spa(path: str):
-    return FileResponse(STATIC / "index.html")
+    """The page itself. Script/style links carry the app version, so a browser loads the new files
+    after every update instead of reusing cached ones; the page is never cached."""
+    global _INDEX_HTML
+    if _INDEX_HTML is None:
+        html = (STATIC / "index.html").read_text()
+        v = APP_VERSION[:12]
+        for f in ("styles.css", "app.js", "chart.umd.min.js"):
+            html = html.replace(f"/static/{f}\"", f"/static/{f}?v={v}\"")
+        _INDEX_HTML = html
+    return HTMLResponse(_INDEX_HTML, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+
+@app.middleware("http")
+async def static_cache_headers(request: Request, call_next):
+    resp = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        # versioned links (?v=...) can be cached for good; anything else must be re-checked
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable" if request.url.query.startswith("v=") else "no-cache"
+    elif request.url.path.startswith("/api/"):
+        resp.headers.setdefault("Cache-Control", "no-store")
+    return resp
