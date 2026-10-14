@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import re
+import time
 from datetime import date, datetime, timedelta
 
 import httpx
@@ -432,6 +433,40 @@ def fetch_prices(con, holding, rng="5d"):
         _store_price(con, holding["id"], day, c * fx.on(day))
         n += 1
     return n
+
+
+# ---------------------------------------------------------------- intraday prices (for the 1D / 5D chart)
+
+_INTRADAY_CACHE = {}  # (symbol, range) -> (fetched_at, [(epoch_seconds, gbp_price)])
+INTRADAY_TTL = 300    # seconds
+
+
+def fetch_intraday(symbol, rng="1d"):
+    """Intraday GBP prices from Yahoo for a ticker: 5-minute bars for '1d', 15-minute for '5d'.
+    Cached for 5 minutes. Returns [] for ISIN/FT funds (priced once a day) or if Yahoo can't be reached."""
+    sym = (symbol or "").strip()
+    if not sym or is_ft_symbol(sym):
+        return []
+    key = (sym, rng)
+    hit = _INTRADAY_CACHE.get(key)
+    if hit and time.time() - hit[0] < INTRADAY_TTL:
+        return hit[1]
+    interval = "5m" if rng == "1d" else "15m"
+    try:
+        with httpx.Client(timeout=15, follow_redirects=True) as client:
+            r = client.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
+                           params={"range": rng, "interval": interval, "includePrePost": "false"}, headers=UA)
+            r.raise_for_status()
+            res = r.json()["chart"]["result"][0]
+            fx = FxSeries(client, res["meta"].get("currency", "GBP"), "1mo")
+            ts = res.get("timestamp") or []
+            closes = (res.get("indicators", {}).get("quote") or [{}])[0].get("close") or []
+            bars = [(t, c * fx.on(datetime.utcfromtimestamp(t).date().isoformat())) for t, c in zip(ts, closes) if c is not None]
+    except Exception as e:
+        log.warning("intraday fetch failed for %s: %s", sym, e)
+        bars = hit[1] if hit else []
+    _INTRADAY_CACHE[key] = (time.time(), bars)
+    return bars
 
 
 def refresh_all_prices(con, rng="1mo"):  # a month back each run: catches any missed days and dividends

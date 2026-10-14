@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Request, UploadFile
@@ -532,6 +532,56 @@ def series(account_id: int | None = None, start: str | None = None, include_hidd
         row["value"] = round(row["value"], 2); row["contributed"] = round(row["contributed"], 2)
         pts.append(row)
     return {"points": pts, "accounts": [{"id": a["id"], "name": a["name"]} for a in accounts if a["id"] in ids]}
+
+
+@app.get("/api/series/intraday")
+def series_intraday(range: str = "1d", account_id: int | None = None, include_hidden: bool = False):
+    """1D / 5D chart: value through the trading day(s) using live intraday prices for ETFs and shares.
+    Cash, units and paid-in come from the ledger for each day; holdings without intraday data (FT pension funds,
+    manual prices) use their daily price; statement-valued accounts use their daily value."""
+    rng = "5d" if range == "5d" else "1d"
+    with db() as con:
+        accounts, states, T, H, *_ = _load(con)
+    ids = [account_id] if account_id else [a["id"] for a in accounts if not a["archived"] and (include_hidden or not a["hidden"])]
+    bars = {}  # holding id -> [(ts, price)]
+    for i in ids:
+        if states[i].a["valuation_mode"] == "manual":
+            continue
+        for h in H[i]:
+            b = services.fetch_intraday(h.get("price_symbol"), rng)
+            if b:
+                bars[h["id"]] = b
+    stamps = sorted({t for b in bars.values() for t, _ in b})
+    if not stamps:  # nothing trades intraday (or Yahoo unreachable): fall back to daily values
+        days = 1 if rng == "1d" else 5
+        out = series(account_id=account_id, start=(date.today() - timedelta(days=days)).isoformat(), include_hidden=include_hidden)
+        out["intraday"] = False
+        return out
+    import bisect
+    keyed = {hid: ([t for t, _ in b], [p for _, p in b]) for hid, b in bars.items()}
+    snaps = {}  # (account, day) -> snapshot, so each day's ledger is only replayed once
+    pts = []
+    for ts in stamps:
+        day = datetime.fromtimestamp(ts, timezone.utc).date()
+        row = {"date": datetime.fromtimestamp(ts, timezone.utc).isoformat(), "value": 0.0, "contributed": 0.0, "by_account": {}}
+        for i in ids:
+            sn = snaps.get((i, day)) or snaps.setdefault((i, day), states[i].snapshot(day))
+            if states[i].a["valuation_mode"] == "manual":
+                v = sn["value"]
+            else:
+                v = sn["cash"]
+                for hid, info in sn["holdings"].items():
+                    px = info["price"]
+                    if hid in keyed:
+                        k = bisect.bisect_right(keyed[hid][0], ts) - 1
+                        if k >= 0:
+                            px = keyed[hid][1][k]
+                    v += info["units"] * px
+            row["value"] += v; row["contributed"] += sn["contributed"]
+            row["by_account"][i] = round(v, 2)
+        row["value"] = round(row["value"], 2); row["contributed"] = round(row["contributed"], 2)
+        pts.append(row)
+    return {"points": pts, "accounts": [{"id": a["id"], "name": a["name"]} for a in accounts if a["id"] in ids], "intraday": True}
 
 
 @app.get("/api/income")

@@ -149,23 +149,64 @@ const palette = () => ['--c1', '--c2', '--c3', '--c4', '--c5', '--c6'].map(css);
 const moneyAxis = { ticks: { callback: v => GBP0.format(v) }, grid: { color: () => css('--line') } };
 const tooltipMoney = { callbacks: { label: c => `${c.dataset.label}: ${fmt(c.parsed.y)}` } };
 
-function growthChart(canvas, points, { stacked = false, accounts = [] } = {}) {
+// ------------------------------------------------------------ chart ranges
+const RANGES = ['1D', '5D', '1M', '6M', 'YTD', '1Y', '3Y', '5Y', 'All'];
+const rangeButtons = (id, cur) => `<span class="pill-row ranges" id="${id}">${RANGES.map(r => `<button class="sm ${r === cur ? 'primary' : ''}" data-r="${r}">${r}</button>`).join('')}</span>`;
+function rangeStart(r) {
+  const d = new Date(); d.setHours(12, 0, 0, 0);
+  if (r === 'YTD') return `${d.getFullYear()}-01-01`;
+  const back = { '1M': [0, 1], '6M': [0, 6], '1Y': [1, 0], '3Y': [3, 0], '5Y': [5, 0] }[r];
+  if (!back) return '';
+  d.setFullYear(d.getFullYear() - back[0]); d.setMonth(d.getMonth() - back[1]);
+  return d.toISOString().slice(0, 10);
+}
+async function loadRange(r, params) {   // params: query string without leading '?', e.g. 'include_hidden=true' or 'account_id=3'
+  if (r === '1D' || r === '5D') return api(`series/intraday?range=${r.toLowerCase()}&${params}`);
+  const start = rangeStart(r);
+  return api(`series?${params}${start ? `&start=${start}` : ''}`);
+}
+const labelMode = (r, ser) => ser.intraday ? (r === '1D' ? 'time' : 'daytime') : (['1M', '6M', 'YTD'].includes(r) || (r === '5D' || r === '1D') ? 'day' : 'month');
+function rangeChange(points) {   // change over the period, not counting money paid in or taken out
+  if (points.length < 2) return '';
+  const a = points[0], b = points[points.length - 1];
+  const paid = b.contributed - a.contributed, gain = (b.value - a.value) - paid;
+  const base = a.value + Math.max(paid, 0) / 2;
+  const p = base > 0 ? gain / base * 100 : null;
+  return `<span class="${cls(gain)}">${signed(gain)}${p != null ? ` (${p > 0 ? '+' : ''}${p.toFixed(2)}%)` : ''}</span>`
+    + (Math.abs(paid) >= 0.01 ? `<span class="muted"> · excl. ${fmt(Math.abs(paid))} ${paid > 0 ? 'paid in' : 'withdrawn'}</span>` : '');
+}
+
+function growthChart(canvas, points, { stacked = false, accounts = [], mode = 'month', zoom = false } = {}) {
   const [c1, c2] = palette();
   const labels = points.map(p => p.date);
-  const datasets = stacked
+  let datasets = stacked
     ? accounts.map((a, i) => ({ label: a.name, data: points.map(p => p.by_account[a.id] ?? 0), fill: i === 0 ? 'origin' : '-1', borderWidth: 1.5, pointRadius: 0, tension: .2,
       borderColor: palette()[i % 6], backgroundColor: palette()[i % 6] + '55', stack: 'v' }))
     : [
       { label: 'Value', data: points.map(p => p.value), borderColor: c1, backgroundColor: c1 + '22', fill: true, borderWidth: 2, pointRadius: 0, tension: .2 },
       { label: 'Paid in', data: points.map(p => p.contributed), borderColor: c2, borderDash: [5, 4], borderWidth: 1.5, pointRadius: 0, stepped: true },
     ];
+  // short ranges: leave out the paid-in line and scale to the value itself, so day-to-day moves are visible
+  if (zoom && !stacked) { datasets = datasets.slice(0, 1); datasets[0].fill = 'start'; }
   return chart(canvas, {
     type: 'line', data: { labels, datasets },
     options: {
       responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
-      plugins: { legend: { position: 'bottom', labels: { boxWidth: 12 } }, tooltip: { ...tooltipMoney, callbacks: { ...tooltipMoney.callbacks, title: i => fdate(i[0].label) } } },
+      plugins: { legend: { position: 'bottom', labels: { boxWidth: 12 } }, tooltip: { ...tooltipMoney, callbacks: { ...tooltipMoney.callbacks,
+        title: i => mode === 'time' || mode === 'daytime'
+          ? new Date(i[0].label).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+          : fdate(i[0].label) } } },
       scales: {
-        x: { ticks: { maxTicksLimit: 8, callback(v) { return new Date(this.getLabelForValue(v)).toLocaleDateString('en-GB', { month: 'short', year: '2-digit' }); } }, grid: { display: false } },
+        x: { ticks: { autoSkip: mode !== 'daytime', maxTicksLimit: mode === 'daytime' ? 2000 : 8, maxRotation: 0, callback(v, i, ticks) {
+          const dt = new Date(this.getLabelForValue(v));
+          if (mode === 'time') return dt.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+          if (mode === 'daytime') {   // one label per trading day
+            const prev = i > 0 ? new Date(this.getLabelForValue(ticks[i - 1].value)) : null;
+            return prev && prev.toDateString() === dt.toDateString() ? '' : dt.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric' });
+          }
+          if (mode === 'day') return dt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+          return dt.toLocaleDateString('en-GB', { month: 'short', year: '2-digit' });
+        } }, grid: { display: false } },
         y: { ...moneyAxis, stacked },
       },
     },
@@ -175,6 +216,9 @@ function growthChart(canvas, points, { stacked = false, accounts = [] } = {}) {
 // ------------------------------------------------------------ shared data
 let HOLDINGS = [];
 let SUMMARY = null;
+const growthRange = set => {   // last chosen chart range, remembered in this browser
+  try { if (set) localStorage.setItem('range', set); const r = localStorage.getItem('range'); return RANGES.includes(r) ? r : 'All'; } catch { return set || 'All'; }
+};
 const showHidden = () => { try { return localStorage.getItem('showHidden') === '1'; } catch { return false; } };
 async function loadSummary(incl = false) { SUMMARY = await api('summary' + (incl ? '?include_hidden=true' : '')); return SUMMARY; }
 const eyeIcon = hidden => `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>${hidden ? '<path d="M3 3l18 18"/>' : ''}</svg>`;
@@ -452,11 +496,8 @@ async function viewDashboard() {
     </div>
     <div class="grid g3">
       <div class="card">
-        <div class="card-head"><h2>Growth</h2>
-          <div class="btns">
-            <span class="pill-row" id="ranges">${['1Y', '3Y', 'All'].map(r => `<button class="sm ${r === 'All' ? 'primary' : ''}" data-r="${r}">${r}</button>`).join('')}</span>
-            <button class="sm" id="b-stack">By account</button>
-          </div>
+        <div class="card-head"><div><h2 style="margin:0">Growth</h2><div class="range-change" id="chg-growth"></div></div>
+          <div class="btns">${rangeButtons('ranges', growthRange())}<button class="sm" id="b-stack">By account</button></div>
         </div>
         <div class="chart-box"><canvas id="c-growth"></canvas></div>
       </div>
@@ -504,14 +545,17 @@ async function viewDashboard() {
   if ($('#b-first')) $('#b-first').onclick = () => accountForm();
   $('#b-refresh').onclick = () => guard(() => api('prices/refresh', { method: 'POST' }), 'Prices refreshed').then(route);
 
-  let range = 'All', stacked = false;
+  let range = growthRange(), stacked = false, seq = 0;
   const draw = async () => {
+    const my = ++seq;
+    $('#chg-growth').innerHTML = '<span class="muted">Loading…</span>';
+    const ser = await loadRange(range, `include_hidden=${incl}`);
+    if (my !== seq) return;   // a newer range was picked while this one loaded
     charts.forEach(c => c.destroy()); charts = [];
-    const start = range === 'All' ? '' : new Date(Date.now() - (range === '1Y' ? 365 : 1095) * 864e5).toISOString().slice(0, 10);
-    const ser = await api(`series?include_hidden=${incl}` + (start ? `&start=${start}` : ''));
-    if (ser.points.length) growthChart($('#c-growth'), ser.points, { stacked, accounts: ser.accounts });
+    $('#chg-growth').innerHTML = ser.points.length ? rangeChange(ser.points) + (['1D', '5D'].includes(range) && !ser.intraday ? '<span class="muted"> · daily values (no intraday prices)</span>' : '') : '';
+    if (ser.points.length) growthChart($('#c-growth'), ser.points, { stacked, accounts: ser.accounts, mode: labelMode(range, ser), zoom: ['1D', '5D', '1M'].includes(range) });
   };
-  $$('#ranges button').forEach(b => b.onclick = () => { range = b.dataset.r; $$('#ranges button').forEach(x => x.classList.toggle('primary', x === b)); draw(); });
+  $$('#ranges button').forEach(b => b.onclick = () => { range = b.dataset.r; growthRange(range); $$('#ranges button').forEach(x => x.classList.toggle('primary', x === b)); draw(); });
   $('#b-stack').onclick = e => { stacked = !stacked; e.target.classList.toggle('primary', stacked); draw(); };
   draw();
 }
@@ -582,7 +626,8 @@ async function viewAccount(id) {
   if (tab === 'overview') {
     T.innerHTML = `
       <div class="grid g3">
-        <div class="card"><h2>Value vs paid in</h2><div class="chart-box">${ser.points.length ? '<canvas id="c-acc"></canvas>' : '<div class="empty">Add a transaction to see growth.</div>'}</div></div>
+        <div class="card"><div class="card-head"><div><h2 style="margin:0">Value vs paid in</h2><div class="range-change" id="chg-acc"></div></div>${ser.points.length ? rangeButtons('acc-ranges', growthRange()) : ''}</div>
+          <div class="chart-box">${ser.points.length ? '<canvas id="c-acc"></canvas>' : '<div class="empty">Add a transaction to see growth.</div>'}</div></div>
         <div class="card"><h2>Summary</h2><table><tbody>
           <tr><td>Interest received (TY / all)</td><td class="n">${fmt(a.interest_ty)} / ${fmt(a.interest_total)}</td></tr>
           ${a.interest_rate != null ? `<tr><td>Interest estimate this TY</td><td class="n">${fmt(a.interest_est_ty)}</td></tr><tr><td>Accruing this month (est.)</td><td class="n">${fmt(a.interest_est_month)}</td></tr>` : ''}
@@ -592,7 +637,20 @@ async function viewAccount(id) {
           ${a.valuation_mode === 'holdings' ? `<tr><td>Cash</td><td class="n">${fmt(a.cash)}</td></tr><tr><td>Invested</td><td class="n">${fmt(a.holdings_value)}</td></tr>` : ''}
         </tbody></table>${a.notes ? `<p class="note">${esc(a.notes)}</p>` : ''}</div>
       </div>`;
-    if (ser.points.length) growthChart($('#c-acc'), ser.points);
+    if (ser.points.length) {
+      let r = growthRange(), seq = 0;
+      const drawAcc = async () => {
+        const my = ++seq;
+        $('#chg-acc').innerHTML = '<span class="muted">Loading…</span>';
+        const s2 = await loadRange(r, `account_id=${id}`);
+        if (my !== seq) return;
+        charts.forEach(c => c.destroy()); charts = [];
+        $('#chg-acc').innerHTML = s2.points.length ? rangeChange(s2.points) : '';
+        if (s2.points.length) growthChart($('#c-acc'), s2.points, { mode: labelMode(r, s2), zoom: ['1D', '5D', '1M'].includes(r) });
+      };
+      $$('#acc-ranges button').forEach(b => b.onclick = () => { r = b.dataset.r; growthRange(r); $$('#acc-ranges button').forEach(x => x.classList.toggle('primary', x === b)); drawAcc(); });
+      drawAcc();
+    }
   }
 
   if (tab === 'txns') {

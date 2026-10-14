@@ -192,3 +192,10 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft
 .form-info { font-size: 0.8125rem; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--warn); color: var(--ink); background: var(--panel-2); }
 .int-day td { font-size: 0.75rem; padding-top: 4px; padding-bottom: 4px; }
 .int-month td:first-child { font-weight: 600; }
+
+.range-change { font-size: 0.8125rem; font-weight: 600; margin-top: 2px; min-height: 1.2em; }
+.ranges { flex-wrap: wrap; max-width: 100%; }
+.ranges::-webkit-scrollbar { display: none; }
+.ranges button { flex: 0 0 auto; }
+.card-head > .btns, .card-head > div { min-width: 0; max-width: 100%; }
+.ranges { min-width: 0; }
