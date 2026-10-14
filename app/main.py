@@ -52,6 +52,9 @@ COOKIE = "ft_session"
 PUBLIC_PATHS = {"/login", "/logout", "/api/login", "/api/logout", "/api/health", "/favicon.ico"}
 _secret = None
 _fails = defaultdict(list)   # ip -> recent failed sign-in times
+_all_fails = []              # every recent failure, whatever the address (backstop if addresses are spoofed)
+ALLOW_BASIC_AUTH = os.environ.get("ALLOW_BASIC_AUTH", "false").lower() == "true"
+FAIL_WINDOW, FAILS_PER_IP, FAILS_TOTAL = 300, 5, 20
 
 
 def _session_key():
@@ -87,7 +90,9 @@ def _token_ok(tok):
 
 
 def _is_https(request):
-    return request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https"
+    h = request.headers
+    return (request.url.scheme == "https" or h.get("x-forwarded-proto", "").split(",")[0].strip() == "https"
+            or '"https"' in h.get("cf-visitor", ""))   # Cloudflare's own scheme header
 
 
 def _set_session(resp, request):
@@ -96,7 +101,23 @@ def _set_session(resp, request):
 
 
 def _client_ip(request):
-    return request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "?")
+    """The visitor's real address. Behind Cloudflare, CF-Connecting-IP is set by Cloudflare and can't be faked
+    through it (X-Forwarded-For can be, by sending your own)."""
+    h = request.headers
+    return (h.get("cf-connecting-ip") or h.get("x-real-ip") or h.get("x-forwarded-for", "").split(",")[0]).strip() \
+        or (request.client.host if request.client else "?")
+
+
+def _throttled(ip):
+    """Too many wrong passwords recently from this address, or from everywhere combined."""
+    now = time.time()
+    _fails[ip] = [t for t in _fails[ip] if t > now - FAIL_WINDOW]
+    _all_fails[:] = [t for t in _all_fails if t > now - FAIL_WINDOW]
+    return len(_fails[ip]) >= FAILS_PER_IP or len(_all_fails) >= FAILS_TOTAL
+
+
+def _record_fail(ip):
+    _fails[ip].append(time.time()); _all_fails.append(time.time())
 
 
 def _creds_ok(u, p, ip):
@@ -110,9 +131,13 @@ def _creds_ok(u, p, ip):
 
 
 def _basic_ok(request):
-    """Scripts and tools may still send HTTP Basic credentials. The browser pop-up is never triggered."""
+    """Optional (ALLOW_BASIC_AUTH=true): scripts may send HTTP Basic credentials. Same attempt limits as the
+    sign-in page. The browser pop-up is never triggered."""
     hdr = request.headers.get("authorization", "")
-    if not hdr.startswith("Basic "):
+    if not ALLOW_BASIC_AUTH or not hdr.startswith("Basic "):
+        return False
+    ip = _client_ip(request)
+    if _throttled(ip):
         return False
     try:
         raw = base64.b64decode(hdr[6:].strip())
@@ -121,9 +146,32 @@ def _basic_ok(request):
         except UnicodeDecodeError:
             creds = raw.decode("latin-1")
         u, _, p = creds.partition(":")
-        return _creds_ok(u, p, _client_ip(request))
+        if _creds_ok(u, p, ip):
+            return True
+        _record_fail(ip)
+        return False
     except Exception:
         return False
+
+
+SECURITY_HEADERS = {
+    "X-Frame-Options": "DENY",                         # can't be shown inside another site (clickjacking)
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "same-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+                               "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    for k, v in SECURITY_HEADERS.items():
+        resp.headers.setdefault(k, v)
+    if _is_https(request):
+        resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    return resp
 
 
 @app.middleware("http")
@@ -147,12 +195,12 @@ async def session_auth(request: Request, call_next):
 
 @app.post("/api/login")
 async def login(request: Request, body: dict = Body(...)):
-    ip, now = _client_ip(request), time.time()
-    _fails[ip] = [t for t in _fails[ip] if t > now - 300]
-    if len(_fails[ip]) >= 5:
+    ip = _client_ip(request)
+    if _throttled(ip):
+        log.warning("sign-in paused for %s: too many failed attempts", ip)
         raise HTTPException(429, "Too many attempts – wait a few minutes and try again")
     if not _creds_ok(_env_clean(body.get("username")), body.get("password") or "", ip):
-        _fails[ip].append(now)
+        _record_fail(ip)
         await asyncio.sleep(0.6)   # slows down guessing
         raise HTTPException(401, "Wrong username or password")
     _fails.pop(ip, None)

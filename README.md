@@ -56,7 +56,7 @@ Edit code → `git push` → GitHub Actions builds a new image → your Watchtow
 Everything is in `finance.db` inside the data volume. Use **Data & settings → Download backup** regularly, or back up the `data` folder (stop the container first, or copy the `.db`, `.db-wal` and `.db-shm` together).
 
 ## Security
-Sign-in uses its own page and a signed, HttpOnly session cookie (it holds only an expiry time and a signature – never the password). You're signed out after `SESSION_MINUTES` (default 60) without activity; changing `APP_USERNAME`/`APP_PASSWORD` signs every device out. After 5 wrong passwords from one address, sign-in pauses for a few minutes. Scripts can still use HTTP Basic auth.
+Sign-in uses its own page and a signed, HttpOnly session cookie (it holds only an expiry time and a signature – never the password). You're signed out after `SESSION_MINUTES` (default 60) without activity; changing `APP_USERNAME`/`APP_PASSWORD` signs every device out. After 5 wrong passwords from one address (or 20 from everywhere combined) sign-in pauses for 5 minutes; behind Cloudflare the real visitor address comes from `CF-Connecting-IP`. HTTP Basic auth for scripts is off unless `ALLOW_BASIC_AUTH=true`. Security headers (CSP, no framing, HSTS on https) are sent on every response.
 
 On your home network this is fine over plain http. Don't expose port 8080 to the internet directly – put it behind your reverse proxy with HTTPS (or Tailscale/WireGuard) if you want remote access.
 
