@@ -188,8 +188,9 @@ function growthChart(canvas, points, { stacked = false, accounts = [], mode = 'm
     ];
   // short ranges: leave out the paid-in line and scale to the value itself, so day-to-day moves are visible
   if (zoom && !stacked) { datasets = datasets.slice(0, 1); datasets[0].fill = 'start'; }
-  return chart(canvas, {
+  const c = chart(canvas, {
     type: 'line', data: { labels, datasets },
+    plugins: [rulerPlugin],
     options: {
       responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
       plugins: { legend: { position: 'bottom', labels: { boxWidth: 12 } }, tooltip: { ...tooltipMoney, callbacks: { ...tooltipMoney.callbacks,
@@ -211,6 +212,122 @@ function growthChart(canvas, points, { stacked = false, accounts = [], mode = 'm
       },
     },
   });
+  c.$pts = points; c.$mode = mode;
+  attachRuler(c);
+  return c;
+}
+
+// ------------------------------------------------------------ chart ruler: measure the change between two points
+// Mouse: click and drag. Touch: press and hold (~0.3s) then drag. Click/tap the chart again to clear.
+const rulerHint = `<div class="note ruler-hint">📏 ${matchMedia('(pointer: coarse)').matches ? 'Press and hold the chart, then drag' : 'Click and drag across the chart'} to measure the change between two points.</div>`;
+function rulerText(c, a, b) {
+  const p = c.$pts, A = p[Math.min(a, b)], B = p[Math.max(a, b)];
+  const paid = B.contributed - A.contributed, gain = (B.value - A.value) - paid;
+  const base = A.value + Math.max(paid, 0) / 2;
+  const pctv = base > 0 ? gain / base * 100 : null;
+  const intraday = c.$mode === 'time' || c.$mode === 'daytime';
+  const fmtPt = s => intraday
+    ? new Date(s).toLocaleString('en-GB', c.$mode === 'time' ? { hour: '2-digit', minute: '2-digit' } : { weekday: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : new Date(s.slice(0, 10) + 'T00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: '2-digit' });
+  const ms = new Date(B.date) - new Date(A.date), days = Math.round(ms / 864e5);
+  const span = intraday ? (ms < 864e5 ? `${Math.floor(ms / 36e5)}h ${Math.round(ms % 36e5 / 6e4)}m` : `${days} day${days === 1 ? '' : 's'}`)
+    : days >= 365 ? `${(days / 365.25).toFixed(1)} years` : `${days} day${days === 1 ? '' : 's'}`;
+  const lines = [
+    `${signed(gain)}${pctv != null ? `  (${pctv > 0 ? '+' : ''}${pctv.toFixed(2)}%)` : ''}`,
+    `${fmtPt(A.date)} → ${fmtPt(B.date)} · ${span}`,
+  ];
+  if (Math.abs(paid) >= 0.01) lines.push(`excl. ${fmt(Math.abs(paid))} ${paid > 0 ? 'paid in' : 'withdrawn'}`);
+  return { lines, up: gain >= 0 };
+}
+
+const rulerPlugin = {
+  id: 'ruler',
+  afterDatasetsDraw(c) {
+    const r = c.$ruler;
+    if (!r || r.a == null || r.b == null || r.a === r.b) return;
+    const { ctx, chartArea: ca, scales: { x, y } } = c;
+    const i0 = Math.min(r.a, r.b), i1 = Math.max(r.a, r.b);
+    const x0 = x.getPixelForValue(i0), x1 = x.getPixelForValue(i1);
+    const y0 = y.getPixelForValue(c.$pts[i0].value), y1 = y.getPixelForValue(c.$pts[i1].value);
+    const { lines, up } = rulerText(c, i0, i1);
+    const col = css(up ? '--up' : '--down');
+    ctx.save();
+    ctx.fillStyle = col + '1f'; ctx.fillRect(x0, ca.top, x1 - x0, ca.bottom - ca.top);         // shaded span
+    ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+    for (const xx of [x0, x1]) { ctx.beginPath(); ctx.moveTo(xx, ca.top); ctx.lineTo(xx, ca.bottom); ctx.stroke(); }
+    ctx.setLineDash([]); ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();                     // start → end
+    for (const [xx, yy] of [[x0, y0], [x1, y1]]) {
+      ctx.beginPath(); ctx.arc(xx, yy, 4.5, 0, Math.PI * 2); ctx.fillStyle = css('--panel'); ctx.fill(); ctx.stroke();
+    }
+    // label box, kept inside the plot area
+    const fs = Math.round(12 * (parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--text-scale')) || 1));
+    ctx.font = `600 ${fs + 1}px ${getComputedStyle(document.body).fontFamily}`;
+    const w0 = ctx.measureText(lines[0]).width;
+    ctx.font = `400 ${fs}px ${getComputedStyle(document.body).fontFamily}`;
+    const w = Math.max(w0, ...lines.slice(1).map(l => ctx.measureText(l).width)) + 20, h = lines.length * (fs + 6) + 12;
+    let bx = (x0 + x1) / 2 - w / 2;
+    bx = Math.max(ca.left + 4, Math.min(bx, ca.right - w - 4));
+    const by = ca.top + 6;
+    ctx.fillStyle = css('--panel'); ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.roundRect ? ctx.roundRect(bx, by, w, h, 8) : ctx.rect(bx, by, w, h); ctx.fill(); ctx.stroke();
+    lines.forEach((l, k) => {
+      ctx.font = `${k === 0 ? 600 : 400} ${k === 0 ? fs + 1 : fs}px ${getComputedStyle(document.body).fontFamily}`;
+      ctx.fillStyle = k === 0 ? col : css('--muted');
+      ctx.fillText(l, bx + 10, by + 6 + (k + 1) * (fs + 6) - 4);
+    });
+    ctx.restore();
+  },
+};
+
+function attachRuler(c) {
+  const cv = c.canvas;
+  cv.$rulerOff?.();   // the canvas is reused when the range changes: drop the previous chart's listeners
+  const ac = new AbortController(), sig = { signal: ac.signal };
+  cv.$rulerOff = () => ac.abort();
+  const idx = clientX => {
+    const x = clientX - cv.getBoundingClientRect().left;
+    const ca = c.chartArea, n = c.$pts.length;
+    const v = c.scales.x.getValueForPixel(Math.max(ca.left, Math.min(x, ca.right)));
+    return Math.max(0, Math.min(n - 1, Math.round(v)));
+  };
+  const setTooltip = on => { c.options.plugins.tooltip.enabled = on; if (!on) c.tooltip.setActiveElements([], { x: 0, y: 0 }); };
+  const start = clientX => { const i = idx(clientX); c.$ruler = { a: i, b: i, active: true }; setTooltip(false); c.draw(); };
+  const move = clientX => { if (c.ctx && c.$ruler && c.$ruler.active) { c.$ruler.b = idx(clientX); c.draw(); } };
+  const end = () => {
+    if (!c.$ruler || !c.ctx) return;
+    c.$ruler.active = false;
+    if (c.$ruler.a === c.$ruler.b) c.$ruler = null;   // a plain click clears the ruler
+    setTooltip(!c.$ruler);                             // hover tooltip stays off while a measurement is shown
+    c.update('none');
+  };
+  // mouse
+  cv.addEventListener('mousedown', e => {
+    if (e.button !== 0 || !c.ctx) return;
+    e.preventDefault(); start(e.clientX);
+    const mm = ev => move(ev.clientX);
+    const mu = () => { window.removeEventListener('mousemove', mm); window.removeEventListener('mouseup', mu); end(); };
+    window.addEventListener('mousemove', mm); window.addEventListener('mouseup', mu);
+  }, sig);
+  // touch: press and hold to start, so normal swipes still scroll the page
+  let timer = null, sx = 0, sy = 0, armed = false;
+  cv.addEventListener('touchstart', e => {
+    const t = e.touches[0]; sx = t.clientX; sy = t.clientY; armed = false;
+    clearTimeout(timer);
+    timer = setTimeout(() => { if (!c.ctx) return; armed = true; start(sx); navigator.vibrate?.(10); }, 300);
+  }, { passive: true, ...sig });
+  cv.addEventListener('touchmove', e => {
+    const t = e.touches[0];
+    if (!armed) { if (Math.hypot(t.clientX - sx, t.clientY - sy) > 10) clearTimeout(timer); return; }
+    e.preventDefault(); move(t.clientX);
+  }, { passive: false, ...sig });
+  cv.addEventListener('touchend', () => {
+    clearTimeout(timer);
+    if (armed) end(); else if (c.$ruler) { c.$ruler = null; setTooltip(true); c.update('none'); }   // quick tap clears
+    armed = false;
+  }, sig);
+  cv.addEventListener('contextmenu', e => { if (armed || (c.$ruler && c.$ruler.active)) e.preventDefault(); }, sig);
+  cv.style.cursor = 'crosshair';
 }
 
 // ------------------------------------------------------------ shared data
@@ -499,7 +616,7 @@ async function viewDashboard() {
         <div class="card-head"><div><h2 style="margin:0">Growth</h2><div class="range-change" id="chg-growth"></div></div>
           <div class="btns">${rangeButtons('ranges', growthRange())}<button class="sm" id="b-stack">By account</button></div>
         </div>
-        <div class="chart-box"><canvas id="c-growth"></canvas></div>
+        <div class="chart-box"><canvas id="c-growth"></canvas></div>${rulerHint}
       </div>
       <div class="stack">
         <div class="card">
@@ -627,7 +744,7 @@ async function viewAccount(id) {
     T.innerHTML = `
       <div class="grid g3">
         <div class="card"><div class="card-head"><div><h2 style="margin:0">Value vs paid in</h2><div class="range-change" id="chg-acc"></div></div>${ser.points.length ? rangeButtons('acc-ranges', growthRange()) : ''}</div>
-          <div class="chart-box">${ser.points.length ? '<canvas id="c-acc"></canvas>' : '<div class="empty">Add a transaction to see growth.</div>'}</div></div>
+          <div class="chart-box">${ser.points.length ? '<canvas id="c-acc"></canvas>' : '<div class="empty">Add a transaction to see growth.</div>'}</div>${ser.points.length ? rulerHint : ''}</div>
         <div class="card"><h2>Summary</h2><table><tbody>
           <tr><td>Interest received (TY / all)</td><td class="n">${fmt(a.interest_ty)} / ${fmt(a.interest_total)}</td></tr>
           ${a.interest_rate != null ? `<tr><td>Interest estimate this TY</td><td class="n">${fmt(a.interest_est_ty)}</td></tr><tr><td>Accruing this month (est.)</td><td class="n">${fmt(a.interest_est_month)}</td></tr>` : ''}
