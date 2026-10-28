@@ -358,6 +358,36 @@ def estimate_interest(state: AccountState, rates, start, end):
     return total
 
 
+# ---------------------------------------------------------------- time-weighted return
+
+def period_return(v0, c0, v1, c1):
+    """Return over one step that ignores money paid in or taken out (Modified Dietz, flows mid-step).
+    v = value, c = cumulative paid in at each end of the step. None when there was nothing invested."""
+    flow = c1 - c0
+    if v0 < 1:   # nothing invested at the start: measure against what was paid in during the step
+        return (v1 - flow) / flow if flow >= 1 else None
+    base = v0 + flow / 2
+    return (v1 - v0 - flow) / base if base >= 1 else None
+
+
+def twr(points):
+    """Time-weighted return over a run of (value, paid_in) points: chains each step's return, so a deposit
+    or withdrawal never moves it – only how the money already invested performed. Returns the growth factor - 1."""
+    g = 1.0
+    for (v0, c0), (v1, c1) in zip(points, points[1:]):
+        r = period_return(v0, c0, v1, c1)
+        if r is not None:
+            g *= 1 + r
+    return g - 1
+
+
+def annualise(total, days):
+    """Yearly rate equivalent to a total return over `days`; None under a year, where it would only exaggerate."""
+    if total is None or days < 365 or total <= -1:
+        return None
+    return (1 + total) ** (365.25 / days) - 1
+
+
 # ---------------------------------------------------------------- XIRR
 
 def xirr(flows):

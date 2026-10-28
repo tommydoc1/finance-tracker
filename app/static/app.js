@@ -210,12 +210,38 @@ function prevCloseChange(ser) {   // 1D only: how brokers quote "today" – late
   const g = (b.value - a.value) - (b.contributed - a.contributed), p = g / a.value * 100;
   return `<span class="muted"> · </span><span class="${cls(g)}" title="Compared with the closing value before today's chart starts">${signed(g)} (${p > 0 ? '+' : ''}${p.toFixed(2)}%) vs previous close</span>`;
 }
+// time-weighted growth: each step's return chained together, so money paid in or taken out never moves it
+function stepReturn(a, b) {
+  const flow = b.contributed - a.contributed;
+  if (a.value < 1) return flow >= 1 ? (b.value - flow) / flow : null;
+  const base = a.value + flow / 2;
+  return base >= 1 ? (b.value - a.value - flow) / base : null;
+}
+function growthPcts(points) {   // cumulative % growth at each point, starting from 0
+  let g = 1; const out = [0];
+  for (let i = 1; i < points.length; i++) { const r = stepReturn(points[i - 1], points[i]); if (r != null) g *= 1 + r; out.push((g - 1) * 100); }
+  return out;
+}
+function twrBetween(points, i0, i1) {
+  let g = 1, any = false;
+  for (let i = i0 + 1; i <= i1; i++) { const r = stepReturn(points[i - 1], points[i]); if (r != null) { g *= 1 + r; any = true; } }
+  return any ? (g - 1) * 100 : null;
+}
+// headline return: time-weighted, so deposits and withdrawals don't move it (XIRR, which they do, is in the tooltip)
+const twrText = o => o.twr_annual != null ? `${pct(o.twr_annual * 100, 1)} a year`
+  : o.twr != null ? `${pct(o.twr * 100, 1)} since ${fdate(o.twr_since)}` : '—';
+const twrTitle = o => `Time-weighted return – how the money invested has performed, unaffected by when you paid in or took out. `
+  + `Shown per year once there's a year of history. Money-weighted (XIRR): ${o.xirr == null ? '—' : pct(o.xirr * 100, 1) + ' a year'}.`;
+const CHART_VIEWS = { growth: '% Growth', value: '£ Value' };
+const chartView = v => {   // remembered per browser
+  try { if (v) localStorage.setItem('chartView', v); return localStorage.getItem('chartView') || 'growth'; } catch { return v || 'growth'; }
+};
+const viewButtons = (id, cur) => `<span class="pill-row ranges" id="${id}">${Object.entries(CHART_VIEWS).map(([k, l]) => `<button class="sm ${k === cur ? 'primary' : ''}" data-v="${k}">${l}</button>`).join('')}</span>`;
 function rangeChange(points, holding = false) {   // change over the period, not counting money paid in or taken out
   if (points.length < 2) return '';
   const a = points[0], b = points[points.length - 1];
   const paid = b.contributed - a.contributed, gain = (b.value - a.value) - paid;
-  const base = a.value + Math.max(paid, 0) / 2;
-  const p = base > 0 ? gain / base * 100 : null;
+  const p = twrBetween(points, 0, points.length - 1);
   return `<span class="${cls(gain)}">${signed(gain)}${p != null ? ` (${p > 0 ? '+' : ''}${p.toFixed(2)}%)` : ''}</span>`
     + (Math.abs(paid) >= 0.01 ? `<span class="muted"> · excl. ${fmt(Math.abs(paid))} ${holding ? (paid > 0 ? 'net bought' : 'net sold / received') : (paid > 0 ? 'paid in' : 'withdrawn')}</span>` : '');
 }
@@ -225,10 +251,14 @@ const holdingSelect = (id, accountId) => {
   return hs.length ? `<select class="chart-filter" id="${id}" aria-label="Show a single holding"><option value="">Whole account</option>${hs.map(h => `<option value="${h.id}">${esc(h.ticker)}${h.name ? ' – ' + esc(h.name.length > 34 ? h.name.slice(0, 33) + '…' : h.name) : ''}</option>`).join('')}</select>` : '';
 };
 
-function growthChart(canvas, points, { stacked = false, accounts = [], mode = 'month', zoom = false, holding = false } = {}) {
+function growthChart(canvas, points, { stacked = false, accounts = [], mode = 'month', zoom = false, holding = false, view = 'value' } = {}) {
   const [c1, c2] = palette();
   const labels = points.map(p => p.date);
-  let datasets = stacked
+  const growth = view === 'growth' && !stacked;
+  const gp = growth ? growthPcts(points) : null;
+  let datasets = growth
+    ? [{ label: 'Growth', data: gp, borderColor: c1, backgroundColor: c1 + '22', fill: 'origin', borderWidth: 2, pointRadius: 0, tension: .2 }]
+    : stacked
     ? accounts.map((a, i) => ({ label: a.name, data: points.map(p => p.by_account[a.id] ?? 0), fill: i === 0 ? 'origin' : '-1', borderWidth: 1.5, pointRadius: 0, tension: .2,
       borderColor: palette()[i % 6], backgroundColor: palette()[i % 6] + '55', stack: 'v' }))
     : [
@@ -236,13 +266,14 @@ function growthChart(canvas, points, { stacked = false, accounts = [], mode = 'm
       { label: holding ? 'Net invested' : 'Paid in', data: points.map(p => p.contributed), borderColor: c2, borderDash: [5, 4], borderWidth: 1.5, pointRadius: 0, stepped: true },
     ];
   // short ranges: leave out the paid-in line and scale to the value itself, so day-to-day moves are visible
-  if (zoom && !stacked) { datasets = datasets.slice(0, 1); datasets[0].fill = 'start'; }
+  if (zoom && !stacked && !growth) { datasets = datasets.slice(0, 1); datasets[0].fill = 'start'; }
   const c = chart(canvas, {
     type: 'line', data: { labels, datasets },
     plugins: [rulerPlugin],
     options: {
       responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
-      plugins: { legend: { position: 'bottom', labels: { boxWidth: 12 } }, tooltip: { ...tooltipMoney, callbacks: { ...tooltipMoney.callbacks,
+      plugins: { legend: { display: !growth, position: 'bottom', labels: { boxWidth: 12 } }, tooltip: { ...tooltipMoney, callbacks: { ...tooltipMoney.callbacks,
+        ...(growth ? { label: c => `Growth ${c.parsed.y > 0 ? '+' : ''}${c.parsed.y.toFixed(2)}% · value ${fmt(points[c.dataIndex].value)}` } : {}),
         title: i => mode === 'time' || mode === 'daytime'
           ? new Date(i[0].label).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
           : fdate(i[0].label) } } },
@@ -257,11 +288,12 @@ function growthChart(canvas, points, { stacked = false, accounts = [], mode = 'm
           if (mode === 'day') return dt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
           return dt.toLocaleDateString('en-GB', { month: 'short', year: '2-digit' });
         } }, grid: { display: false } },
-        y: { ...moneyAxis, stacked },
+        y: growth ? { ticks: { callback: v => `${+v.toFixed(2)}%` }, grid: moneyAxis.grid } : { ...moneyAxis, stacked },
       },
     },
   });
   c.$pts = points; c.$mode = mode; c.$holding = holding;
+  c.$y = growth ? gp : points.map(p => p.value);   // what's plotted, for the ruler's end points
   attachRuler(c);
   return c;
 }
@@ -272,8 +304,7 @@ const rulerHint = `<div class="note ruler-hint">📏 ${matchMedia('(pointer: coa
 function rulerText(c, a, b) {
   const p = c.$pts, A = p[Math.min(a, b)], B = p[Math.max(a, b)];
   const paid = B.contributed - A.contributed, gain = (B.value - A.value) - paid;
-  const base = A.value + Math.max(paid, 0) / 2;
-  const pctv = base > 0 ? gain / base * 100 : null;
+  const pctv = twrBetween(p, Math.min(a, b), Math.max(a, b));
   const intraday = c.$mode === 'time' || c.$mode === 'daytime';
   const fmtPt = s => intraday
     ? new Date(s).toLocaleString('en-GB', c.$mode === 'time' ? { hour: '2-digit', minute: '2-digit' } : { weekday: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
@@ -297,7 +328,7 @@ const rulerPlugin = {
     const { ctx, chartArea: ca, scales: { x, y } } = c;
     const i0 = Math.min(r.a, r.b), i1 = Math.max(r.a, r.b);
     const x0 = x.getPixelForValue(i0), x1 = x.getPixelForValue(i1);
-    const y0 = y.getPixelForValue(c.$pts[i0].value), y1 = y.getPixelForValue(c.$pts[i1].value);
+    const y0 = y.getPixelForValue(c.$y[i0]), y1 = y.getPixelForValue(c.$y[i1]);
     const { lines, up } = rulerText(c, i0, i1);
     const col = css(up ? '--up' : '--down');
     ctx.save();
@@ -655,7 +686,7 @@ async function viewDashboard() {
     <div class="kpis">
       ${kpi('Net worth', fmt(t.value), `${signed(t.gain)} all-time`, 'hero')}
       ${kpi('Paid in', fmt(t.contributed), t.tax_relief_total ? `incl. ${fmt(t.tax_relief_total)} tax relief` : 'deposits + contributions')}
-      ${kpi('Growth', `<span class="${cls(t.gain)}">${pct(gainPct, 1)}</span>`, `Annualised (XIRR) ${t.xirr == null ? '—' : pct(t.xirr * 100, 1)}`)}
+      ${kpi('Growth', `<span class="${cls(t.gain)}">${pct(gainPct, 1)}</span>`, `<span title="${esc(twrTitle(t))}">Return ${twrText(t)}</span>`)}
       ${kpi(`Dividends ${s.tax_year}`, fmt(t.dividends_ty), `${fmt(t.dividends_total)} all-time`)}
       ${kpi(`Interest ${s.tax_year}`, fmt(t.interest_ty), `≈ ${fmt(t.interest_est_annual)}/yr at current rates`)}
       ${kpi('Est. annual charges', fmt(t.charges_total_annual), `platform + fund OCFs · ${fmt(t.fees_ty)} paid this TY`)}
@@ -663,7 +694,7 @@ async function viewDashboard() {
     <div class="grid g3">
       <div class="card">
         <div class="card-head"><div><h2 style="margin:0">Growth</h2><div class="range-change" id="chg-growth"></div></div>
-          <div class="btns"><select class="chart-filter" id="g-account" aria-label="Account"><option value="">All accounts</option>${live.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select><span id="g-holding-wrap"></span>${rangeButtons('ranges', growthRange())}<button class="sm" id="b-stack">By account</button></div>
+          <div class="btns"><select class="chart-filter" id="g-account" aria-label="Account"><option value="">All accounts</option>${live.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select><span id="g-holding-wrap"></span>${rangeButtons('ranges', growthRange())}${viewButtons('g-view', chartView())}<button class="sm" id="b-stack">By account</button></div>
         </div>
         <div class="chart-box"><canvas id="c-growth"></canvas></div>${rulerHint}
       </div>
@@ -712,7 +743,7 @@ async function viewDashboard() {
   $('#b-refresh').onclick = () => guard(() => api('prices/refresh', { method: 'POST' }), 'Prices refreshed').then(route);
 
   await loadHoldings();
-  let range = growthRange(), stacked = false, seq = 0, acct = '', hold = '';
+  let range = growthRange(), stacked = false, seq = 0, acct = '', hold = '', cview = chartView();
   const draw = async () => {
     const my = ++seq;
     $('#chg-growth').innerHTML = '<span class="muted">Loading…</span>';
@@ -722,7 +753,7 @@ async function viewDashboard() {
     charts.forEach(c => c.destroy()); charts = [];
     $('#chg-growth').innerHTML = ser.points.length ? rangeChange(ser.points, !!hold) + (range === '1D' && ser.intraday ? prevCloseChange(ser) : '') + (['1D', '5D'].includes(range) && !ser.intraday ? '<span class="muted"> · daily values (no intraday prices)</span>' : '')
       : '<span class="muted">No data for this selection yet.</span>';
-    if (ser.points.length) growthChart($('#c-growth'), ser.points, { stacked: stacked && !acct, accounts: ser.accounts, mode: labelMode(range, ser), zoom: ['1D', '5D', '1M'].includes(range), holding: !!hold });
+    if (ser.points.length) growthChart($('#c-growth'), ser.points, { stacked: stacked && !acct, accounts: ser.accounts, mode: labelMode(range, ser), zoom: ['1D', '5D', '1M'].includes(range), holding: !!hold, view: cview });
   };
   $('#g-account').onchange = e => {
     acct = e.target.value; hold = '';
@@ -733,7 +764,10 @@ async function viewDashboard() {
     draw();
   };
   $$('#ranges button').forEach(b => b.onclick = () => { range = b.dataset.r; growthRange(range); $$('#ranges button').forEach(x => x.classList.toggle('primary', x === b)); draw(); });
-  $('#b-stack').onclick = e => { stacked = !stacked; e.target.classList.toggle('primary', stacked); draw(); };
+  const setView = v => { cview = chartView(v); $$('#g-view button').forEach(x => x.classList.toggle('primary', x.dataset.v === cview)); };
+  $$('#g-view button').forEach(b => b.onclick = () => { setView(b.dataset.v); if (cview === 'growth' && stacked) { stacked = false; $('#b-stack').classList.remove('primary'); } draw(); });
+  // "By account" stacks values, so it switches the chart to £ Value
+  $('#b-stack').onclick = e => { stacked = !stacked; e.target.classList.toggle('primary', stacked); if (stacked) setView('value'); draw(); };
   draw();
 }
 
@@ -743,13 +777,13 @@ async function viewAccounts() {
     <div class="page-head"><div><h1>Accounts</h1><div class="sub">${s.accounts.length} account${s.accounts.length === 1 ? '' : 's'}</div></div>
       <button class="primary" id="b-add">Add account</button></div>
     <div class="card"><div class="table-wrap"><table>
-      <thead><tr><th></th><th>Account</th><th>Type</th><th class="n">Value</th><th class="n">Paid in</th><th class="n">Gain</th><th class="n">XIRR</th><th class="n">Rate</th><th class="n">Charges/yr</th></tr></thead>
+      <thead><tr><th></th><th>Account</th><th>Type</th><th class="n">Value</th><th class="n">Paid in</th><th class="n">Gain</th><th class="n" title="Time-weighted return – unaffected by deposits and withdrawals">Return</th><th class="n">Rate</th><th class="n">Charges/yr</th></tr></thead>
       <tbody>${s.accounts.map(a => `
         <tr style="cursor:pointer;${a.archived ? 'opacity:.55' : ''}" onclick="location.hash='#/account/${a.id}'">
           <td style="width:1%"><button class="icon eye" data-eye="${a.id}" title="${a.hidden ? 'Hidden from overview – click to show' : 'Shown on overview – click to hide'}">${eyeIcon(a.hidden)}</button></td>
           <td><b>${esc(a.name)}</b><div class="muted" style="font-size:12px">${esc(a.provider || '')}${a.archived ? ' · archived' : ''}${a.hidden ? ' · hidden from overview' : ''}</div></td>
           <td>${typeTag(a.type)}</td><td class="n">${fmt(a.value)}</td><td class="n">${fmt(a.contributed)}</td>
-          <td class="n ${cls(a.gain)}">${signed(a.gain)}</td><td class="n">${a.xirr == null ? '—' : pct(a.xirr * 100, 1)}</td>
+          <td class="n ${cls(a.gain)}">${signed(a.gain)}</td><td class="n" title="${esc(twrTitle(a))}">${twrText(a)}</td>
           <td class="n">${a.interest_rate == null ? '—' : pct(a.interest_rate)}</td><td class="n">${fmt(a.charges_total_annual)}</td>
         </tr>`).join('') || '<tr><td colspan="9" class="muted">No accounts yet.</td></tr>'}</tbody>
     </table></div></div>`;
@@ -784,7 +818,7 @@ async function viewAccount(id) {
     <div class="kpis">
       ${kpi('Value', fmt(a.value), a.valuation_mode === 'manual' ? (a.last_valuation ? `statement ${fdate(a.last_valuation.date)} + later payments` : 'no statement yet – showing paid in') : `cash ${fmt(a.cash)}`, 'hero')}
       ${kpi('Paid in', fmt(a.contributed), a.tax_relief_total ? `incl. ${fmt(a.tax_relief_total)} tax relief` : '')}
-      ${kpi('Gain', `<span class="${cls(a.gain)}">${signed(a.gain)}</span>`, `${pct(a.gain_pct, 1)} · XIRR ${a.xirr == null ? '—' : pct(a.xirr * 100, 1)}`)}
+      ${kpi('Gain', `<span class="${cls(a.gain)}">${signed(a.gain)}</span>`, `${pct(a.gain_pct, 1)} · <span title="${esc(twrTitle(a))}">return ${twrText(a)}</span>`)}
       ${a.interest_rate != null ? kpi('Interest rate', pct(a.interest_rate), `≈ ${fmt(a.interest_est_annual)}/yr on current balance`) : ''}
       ${a.dividends_total ? kpi('Dividends', fmt(a.dividends_ty), `this TY · ${fmt(a.dividends_total)} all-time`) : ''}
       ${kpi('Est. charges / yr', fmt(a.charges_total_annual), `platform ${fmt(a.charges_platform_annual)} · funds ${fmt(a.charges_ocf_annual)}`)}
@@ -803,7 +837,7 @@ async function viewAccount(id) {
   if (tab === 'overview') {
     T.innerHTML = `
       <div class="grid g3">
-        <div class="card"><div class="card-head"><div><h2 style="margin:0" id="acc-chart-title">Value vs paid in</h2><div class="range-change" id="chg-acc"></div></div>${ser.points.length ? `<div class="btns">${holdingSelect('acc-holding', a.id)}${rangeButtons('acc-ranges', growthRange())}</div>` : ''}</div>
+        <div class="card"><div class="card-head"><div><h2 style="margin:0" id="acc-chart-title">Value vs paid in</h2><div class="range-change" id="chg-acc"></div></div>${ser.points.length ? `<div class="btns">${holdingSelect('acc-holding', a.id)}${rangeButtons('acc-ranges', growthRange())}${viewButtons('acc-view', chartView())}</div>` : ''}</div>
           <div class="chart-box">${ser.points.length ? '<canvas id="c-acc"></canvas>' : '<div class="empty">Add a transaction to see growth.</div>'}</div>${ser.points.length ? rulerHint : ''}</div>
         <div class="card"><h2>Summary</h2><table><tbody>
           <tr><td>Interest received (TY / all)</td><td class="n">${fmt(a.interest_ty)} / ${fmt(a.interest_total)}</td></tr>
@@ -815,18 +849,19 @@ async function viewAccount(id) {
         </tbody></table>${a.notes ? `<p class="note">${esc(a.notes)}</p>` : ''}</div>
       </div>`;
     if (ser.points.length) {
-      let r = growthRange(), seq = 0, hold = '';
+      let r = growthRange(), seq = 0, hold = '', cview = chartView();
       const drawAcc = async () => {
         const my = ++seq;
         $('#chg-acc').innerHTML = '<span class="muted">Loading…</span>';
         const s2 = await loadRange(r, hold ? `holding_id=${hold}` : `account_id=${id}`);
         if (my !== seq) return;
         charts.forEach(c => c.destroy()); charts = [];
-        $('#acc-chart-title').textContent = hold ? 'Value vs net invested' : 'Value vs paid in';
+        $('#acc-chart-title').textContent = cview === 'growth' ? 'Growth' : hold ? 'Value vs net invested' : 'Value vs paid in';
         $('#chg-acc').innerHTML = s2.points.length ? rangeChange(s2.points, !!hold) + (r === '1D' && s2.intraday ? prevCloseChange(s2) : '') : '<span class="muted">No data for this holding yet.</span>';
-        if (s2.points.length) growthChart($('#c-acc'), s2.points, { mode: labelMode(r, s2), zoom: ['1D', '5D', '1M'].includes(r), holding: !!hold });
+        if (s2.points.length) growthChart($('#c-acc'), s2.points, { mode: labelMode(r, s2), zoom: ['1D', '5D', '1M'].includes(r), holding: !!hold, view: cview });
       };
       if ($('#acc-holding')) $('#acc-holding').onchange = e => { hold = e.target.value; drawAcc(); };
+      $$('#acc-view button').forEach(b => b.onclick = () => { cview = chartView(b.dataset.v); $$('#acc-view button').forEach(x => x.classList.toggle('primary', x === b)); drawAcc(); });
       $$('#acc-ranges button').forEach(b => b.onclick = () => { r = b.dataset.r; growthRange(r); $$('#acc-ranges button').forEach(x => x.classList.toggle('primary', x === b)); drawAcc(); });
       drawAcc();
     }

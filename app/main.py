@@ -570,6 +570,22 @@ def _paid_in_warnings(a, st, snap, today):
     return w
 
 
+def _twr(states, ids, today):
+    """Time-weighted return of one or more accounts combined, from their first record to today (daily steps)."""
+    firsts = [calc.d(states[i].txns[0]["date"]) for i in ids if states[i].txns]
+    firsts += [calc.d(states[i].vals[0]["date"]) for i in ids if states[i].vals]
+    if not firsts:
+        return {"twr": None, "twr_annual": None, "twr_since": None}
+    start = min(firsts)
+    dates = [start + timedelta(days=n) for n in range((today - start).days + 1)]
+    totals = [[0.0, 0.0] for _ in dates]
+    for i in ids:
+        for n, (v, c) in enumerate(states[i].series(dates)):
+            totals[n][0] += v; totals[n][1] += c
+    total = calc.twr([tuple(p) for p in totals]) if len(dates) > 1 else None
+    return {"twr": total, "twr_annual": calc.annualise(total, (today - start).days), "twr_since": start.isoformat()}
+
+
 def _account_summary(a, st, txns, holds, rts, today):
     snap = st.snapshot(today)
     ty = calc.tax_year_of(today)
@@ -612,6 +628,7 @@ def _account_summary(a, st, txns, holds, rts, today):
         "contributed": snap["contributed"], "gain": snap["value"] - snap["contributed"],
         "gain_pct": (snap["value"] - snap["contributed"]) / snap["contributed"] * 100 if snap["contributed"] > 0 else None,
         "xirr": calc.xirr(flows),
+        **_twr({a["id"]: st}, [a["id"]], today),
         "last_valuation": snap["last_valuation"],
         "holdings": sorted(holdings, key=lambda h: -h["value"]),
         "dividends_total": sums["dividend"], "dividends_ty": sums_ty["dividend"],
@@ -655,7 +672,8 @@ def summary(include_hidden: bool = False):
         "totals": {k: tot(k) for k in ["value", "contributed", "cash", "dividends_total", "dividends_ty", "interest_total",
                                         "interest_ty", "fees_total", "fees_ty", "charges_total_annual", "interest_est_annual",
                                         "tax_relief_total", "interest_est_ty"]}
-                  | {"gain": tot("value") - tot("contributed"), "xirr": calc.xirr(flows)},
+                  | {"gain": tot("value") - tot("contributed"), "xirr": calc.xirr(flows)}
+                  | _twr(states, [a["id"] for a in live], today),
         "isa": {"allowance": calc.ISA_ALLOWANCE, "used": isa_used, "remaining": calc.ISA_ALLOWANCE - isa_used,
                 "lisa_used": lisa_used, "lisa_allowance": calc.LISA_ALLOWANCE,
                 "tax_year_end": calc.tax_year_bounds(calc.tax_year_of(today))[1].isoformat()},
